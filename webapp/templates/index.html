@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalshi Bot Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="login-screen" class="login-screen">
+  <div class="login-card">
+    <div class="login-mark">KB</div>
+    <h1>KALSHI BOT DASHBOARD</h1>
+    <p class="login-sub">Enter the dashboard password shown in the server console.</p>
+    <form id="login-form">
+      <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" autofocus>
+      <button type="submit">Unlock</button>
+    </form>
+    <p id="login-error" class="login-error"></p>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="mark">KB</span>
+      <span class="title">KALSHI BTC 15M BOT</span>
+    </div>
+    <div class="topbar-right">
+      <span id="bot-status-badge" class="badge badge-stopped">STOPPED</span>
+      <button id="btn-start" class="btn btn-start">Start</button>
+      <button id="btn-stop" class="btn btn-stop">Stop</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="monitor">Monitor</button>
+    <button class="tab-btn" data-tab="config">Configuration</button>
+  </nav>
+
+  <!-- ===================== MONITOR ===================== -->
+  <section id="tab-monitor" class="tab-panel active">
+    <div id="crash-panel" class="crash-panel hidden">
+      <div class="crash-panel-title">Bot exited unexpectedly (exit code <span id="crash-exit-code">-</span>)</div>
+      <pre id="crash-tail"></pre>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total P&amp;L</div>
+        <div id="stat-pnl" class="stat-value">$0.00</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Record</div>
+        <div id="stat-record" class="stat-value">0-0</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Cumulative Loss</div>
+        <div id="stat-cumloss" class="stat-value">$0.00</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Max Drawdown</div>
+        <div id="stat-drawdown" class="stat-value">$0.00</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Current Stake</div>
+        <div id="stat-stake" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Chop Skips</div>
+        <div id="stat-chop" class="stat-value">0</div>
+      </div>
+    </div>
+
+    <div class="panel log-panel">
+      <div class="panel-header">
+        <span>Live Log</span>
+        <label class="autoscroll-toggle">
+          <input type="checkbox" id="autoscroll" checked> Auto-scroll
+        </label>
+      </div>
+      <div id="log-view" class="log-view"><div class="log-empty">Waiting for log data...</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== CONFIGURATION ===================== -->
+  <section id="tab-config" class="tab-panel">
+    <div class="config-header">
+      <p class="config-note">Loaded straight from <code>config.yaml</code>. Changes save directly back to that file, preserving all its comments. Restart the bot for changes to take effect.</p>
+      <button id="btn-save-config" class="btn btn-save">Save Changes</button>
+      <span id="save-status" class="save-status"></span>
+    </div>
+
+    <div class="block-title">General settings</div>
+    <div class="cards">
+
+      <div class="card">
+        <h3><span class="n">01</span> Authentication</h3>
+        <div class="field">
+          <label>Key ID</label>
+          <input type="text" id="kalshi_key_id">
+        </div>
+        <div class="field">
+          <label>Private key path</label>
+          <input type="text" id="kalshi_private_key_path">
+        </div>
+        <div class="field">
+          <label>Environment</label>
+          <div class="seg" id="envSeg">
+            <button type="button" data-val="demo">Demo</button>
+            <button type="button" data-val="production">Production</button>
+          </div>
+          <div class="help">Demo is a separate paper-trading exchange - prices won't match kalshi.com.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">02</span> Market</h3>
+        <div class="field">
+          <label>Series ticker</label>
+          <input type="text" id="market_series_ticker">
+        </div>
+      </div>
+
+      <div class="card dryrun-card" id="dryrunCard">
+        <h3><span class="n">03</span> Runtime</h3>
+        <div class="field">
+          <div class="switch-row">
+            <div class="txt">
+              <div class="t">Dry run</div>
+              <div class="d">Simulate everything - place NO real orders</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="runtime_dry_run">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </div>
+        <div class="field row2">
+          <div>
+            <label>Poll interval (sec)</label>
+            <input type="number" id="runtime_poll_interval_sec" step="1" min="1">
+          </div>
+          <div>
+            <label>Settlement timeout (sec)</label>
+            <input type="number" id="runtime_result_wait_timeout_sec" step="5" min="0">
+          </div>
+        </div>
+        <div class="field">
+          <label>State file</label>
+          <input type="text" id="runtime_state_file">
+        </div>
+        <div class="field">
+          <label>Log file</label>
+          <input type="text" id="runtime_log_file">
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">04</span> Sizing</h3>
+        <div class="field">
+          <label>Mode</label>
+          <select id="sizing_mode">
+            <option value="contracts">contracts - classic martingale</option>
+            <option value="dollars">dollars - fixed $ amount</option>
+            <option value="recovery">recovery - price-aware martingale</option>
+          </select>
+        </div>
+        <div class="field row2">
+          <div>
+            <label>Base size</label>
+            <input type="number" id="sizing_base_size" step="1" min="1">
+          </div>
+          <div>
+            <label>Fee / contract (c)</label>
+            <input type="number" id="sizing_fee_per_contract_cents" step="1" min="0">
+          </div>
+        </div>
+        <div id="martingaleFields">
+          <div class="field row2">
+            <div>
+              <label>Martingale x</label>
+              <input type="number" id="sizing_martingale_multiplier" step="0.1" min="1">
+            </div>
+            <div>
+              <label>Max steps</label>
+              <input type="number" id="sizing_max_martingale_steps" step="1" min="1">
+            </div>
+          </div>
+          <div class="field">
+            <label>Max stake</label>
+            <input type="number" id="sizing_max_stake" step="1" min="1">
+          </div>
+        </div>
+        <div class="subpanel" id="recoveryFields">
+          <div class="field row2">
+            <div>
+              <label>Min profit (c)</label>
+              <input type="number" id="recovery_min_profit_cents" step="1" min="0">
+            </div>
+            <div>
+              <label>Max contracts</label>
+              <input type="number" id="recovery_max_contracts" step="1" min="1">
+            </div>
+          </div>
+          <div class="field row2">
+            <div>
+              <label>Price ceiling (c)</label>
+              <input type="number" id="recovery_max_price_cents" step="1" min="1" max="99">
+            </div>
+            <div>
+              <label>Price floor (c)</label>
+              <input type="number" id="recovery_min_price_cents" step="1" min="1" max="99">
+            </div>
+          </div>
+          <div class="field">
+            <label>Max cumulative loss (c)</label>
+            <input type="number" id="recovery_max_cumulative_loss_cents" step="100" min="0">
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">05</span> Entry &amp; pricing</h3>
+        <div class="field row2">
+          <div>
+            <label>Entry start (min)</label>
+            <input type="number" id="strategy_entry_start_min" step="0.5" min="0" max="15">
+          </div>
+          <div>
+            <label>Entry end (min)</label>
+            <input type="number" id="strategy_entry_end_min" step="0.5" min="0" max="15">
+          </div>
+        </div>
+        <div class="field row2">
+          <div>
+            <label>Min price (c)</label>
+            <input type="number" id="strategy_min_price_cents" step="1" min="1" max="99">
+          </div>
+          <div>
+            <label>Max price (c)</label>
+            <input type="number" id="strategy_max_price_cents" step="1" min="1" max="99">
+          </div>
+        </div>
+        <div class="field">
+          <label>Order timeout (sec)</label>
+          <input type="number" id="strategy_order_timeout_sec" step="5" min="1">
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">06</span> Filters</h3>
+        <div class="field">
+          <div class="switch-row">
+            <div class="txt">
+              <div class="t">Momentum filter</div>
+              <div class="d">Block orders against a live short-term BTC trend</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="mf_enabled">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Lookback (sec)</label>
+            <input type="number" id="mf_lookback_sec" step="5" min="5">
+          </div>
+        </div>
+        <div class="subpanel">
+          <div class="switch-row">
+            <div class="txt">
+              <div class="t">Chop filter</div>
+              <div class="d">Skip betting when recent windows are whipsawing</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cf_enabled">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+          <div class="field row2" style="margin-top:10px;">
+            <div>
+              <label>Lookback (windows)</label>
+              <input type="number" id="cf_lookback" step="1" min="2">
+            </div>
+            <div>
+              <label>Max alternations</label>
+              <input type="number" id="cf_max_alternations" step="1" min="1">
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="block-title">Strategy</div>
+    <div class="strategy-tabbar" id="strategyTabbar">
+      <button class="strategy-tab" data-tab="momentum"><span class="pip"></span>MOMENTUM</button>
+      <button class="strategy-tab" data-tab="reversal"><span class="pip"></span>REVERSAL</button>
+      <button class="strategy-tab" data-tab="adaptive"><span class="pip"></span>ADAPTIVE</button>
+      <button class="strategy-tab" data-tab="price_trend"><span class="pip"></span>PRICE_TREND</button>
+      <button class="strategy-tab" data-tab="spot_lean"><span class="pip"></span>SPOT_LEAN</button>
+    </div>
+
+    <div class="strategy-panel" data-panel="momentum">
+      <p class="strategy-desc">Bets the same side that won the previous 15-minute window. No additional parameters.</p>
+      <button type="button" class="use-btn" data-usemode="momentum">Use this strategy</button>
+      <p class="empty-note">Nothing else to configure here.</p>
+    </div>
+
+    <div class="strategy-panel" data-panel="reversal">
+      <p class="strategy-desc">Bets the opposite side of the previous window's winner. No additional parameters.</p>
+      <button type="button" class="use-btn" data-usemode="reversal">Use this strategy</button>
+      <p class="empty-note">Nothing else to configure here.</p>
+    </div>
+
+    <div class="strategy-panel" data-panel="adaptive">
+      <p class="strategy-desc">Win-stay / lose-shift: switches between momentum and reversal based on the bot's own recent results.</p>
+      <button type="button" class="use-btn" data-usemode="adaptive">Use this strategy</button>
+      <div class="card" style="margin-top:16px; max-width:360px;">
+        <h3>Starting mode</h3>
+        <div class="field">
+          <label>Used for the very first bet</label>
+          <select id="adaptive_default_mode">
+            <option value="momentum">momentum</option>
+            <option value="reversal">reversal</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="strategy-panel" data-panel="price_trend">
+      <p class="strategy-desc">Bets on the actual BTC/USD price move over the last few cycles, using each window's own floor_strike.</p>
+      <button type="button" class="use-btn" data-usemode="price_trend">Use this strategy</button>
+      <div class="card" style="margin-top:16px; max-width:420px;">
+        <h3>Trend detection</h3>
+        <div class="field">
+          <label>Lookback cycles</label>
+          <input type="number" id="pt_lookback_cycles" step="1" min="1" max="24">
+        </div>
+        <div class="field">
+          <label>Threshold (%)</label>
+          <input type="number" id="pt_threshold_pct" step="0.01" min="0">
+        </div>
+      </div>
+    </div>
+
+    <div class="strategy-panel" data-panel="spot_lean">
+      <p class="strategy-desc">Bets on where the live BTC/USD spot price currently stands relative to this window's own target.</p>
+      <button type="button" class="use-btn" data-usemode="spot_lean">Use this strategy</button>
+      <div class="cards" style="margin-top:16px;">
+        <div class="card">
+          <h3>Signal</h3>
+          <div class="field">
+            <label>Threshold (%)</label>
+            <input type="number" id="sl_threshold_pct" step="0.01" min="0">
+          </div>
+          <div class="field">
+            <label>Spot poll interval (sec)</label>
+            <input type="number" id="sl_poll_interval_sec" step="1" min="1">
+          </div>
+        </div>
+        <div class="card">
+          <h3>Hedge</h3>
+          <div class="field">
+            <div class="switch-row">
+              <div class="txt">
+                <div class="t">Enable hedging</div>
+                <div class="d">Opposing bet if BTC crosses back mid-window</div>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="hedge_enabled">
+                <span class="track"></span><span class="knob"></span>
+              </label>
+            </div>
+          </div>
+          <div class="subpanel dimmed" id="hedgeSub">
+            <div class="field row2">
+              <div>
+                <label>Threshold (%)</label>
+                <input type="number" id="hedge_threshold_pct" step="0.01" min="0">
+              </div>
+              <div>
+                <label>Max hedges / window</label>
+                <input type="number" id="hedge_max_hedges_per_window" step="1" min="1">
+              </div>
+            </div>
+            <div class="field">
+              <div class="switch-row">
+                <div class="txt"><div class="t">Fresh-start only</div></div>
+                <label class="switch"><input type="checkbox" id="hedge_fresh_start_only"><span class="track"></span><span class="knob"></span></label>
+              </div>
+            </div>
+            <div class="field">
+              <div class="switch-row">
+                <div class="txt"><div class="t">Net-session sizing</div></div>
+                <label class="switch"><input type="checkbox" id="hedge_net_session_sizing"><span class="track"></span><span class="knob"></span></label>
+              </div>
+            </div>
+            <div class="field">
+              <div class="switch-row">
+                <div class="txt"><div class="t">Smart sizing</div></div>
+                <label class="switch"><input type="checkbox" id="hedge_smart_sizing"><span class="track"></span><span class="knob"></span></label>
+              </div>
+            </div>
+            <div class="field row2" style="margin-top:6px;">
+              <div>
+                <label>Min profit (c)</label>
+                <input type="number" id="hedge_min_profit_cents" step="1" min="0">
+              </div>
+              <div>
+                <label>Max contracts</label>
+                <input type="number" id="hedge_max_contracts" step="1" min="1">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
