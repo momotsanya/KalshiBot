@@ -1,3 +1,4 @@
+<!-- V1.3 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,15 +31,23 @@
       <span class="mark">KB</span>
       <span class="title">KALSHI BTC 15M BOT</span>
     </div>
+        <div class="env-status-row">
+
+        </div>
     <div class="topbar-right">
+      <span id="env-mode-badge" class="badge badge-stopped">-</span>
+      <span id="env-name-badge" class="badge badge-stopped">-</span>
       <span id="bot-status-badge" class="badge badge-stopped">STOPPED</span>
       <button id="btn-start" class="btn btn-start">Start</button>
       <button id="btn-stop" class="btn btn-stop">Stop</button>
     </div>
   </header>
 
+
+
   <nav class="tabs">
     <button class="tab-btn active" data-tab="monitor">Monitor</button>
+    <button class="tab-btn" data-tab="simulator">Simulator</button>
     <button class="tab-btn" data-tab="config">Configuration</button>
   </nav>
 
@@ -71,8 +80,78 @@
         <div id="stat-stake" class="stat-value">-</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Chop Skips</div>
-        <div id="stat-chop" class="stat-value">0</div>
+        <div class="stat-label">Recovery Attempts</div>
+        <div id="stat-recovery-attempts" class="stat-value">0</div>
+      </div>
+    </div>
+
+    <div class="session-time-row">
+      <div class="panel session-panel">
+        <div class="gauge-wrap">
+          <svg id="gauge-svg" class="gauge-svg" viewBox="0 0 220 190">
+            <path id="gauge-track" class="gauge-track"></path>
+            <path id="gauge-band-before" class="gauge-band-red"></path>
+            <path id="gauge-band-after" class="gauge-band-red"></path>
+            <path id="gauge-band" class="gauge-band"></path>
+            <g id="gauge-ticks"></g>
+            <g id="gauge-numbers"></g>
+            <text class="spotgauge-target" x="110" y="13" text-anchor="middle">SESSION TIME</text>
+            <line id="gauge-needle" class="gauge-needle" x1="110" y1="110" x2="110" y2="110"></line>
+            <circle id="gauge-pivot" class="gauge-pivot" cx="110" cy="110" r="6"></circle>
+            <text id="gauge-readout" class="gauge-readout" x="110" y="152" text-anchor="middle">00:00</text>
+            <text id="timegauge-min" class="timegauge-min" x="110" y="175" text-anchor="middle">--</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="panel spotlean-panel">
+        <div class="gauge-wrap">
+          <svg id="spotgauge-svg" class="gauge-svg" viewBox="0 0 220 190">
+            <path id="spotgauge-track-red" class="spotgauge-track-red"></path>
+            <path id="spotgauge-track-green" class="spotgauge-track-green"></path>
+            <path id="spotgauge-deadzone" class="spotgauge-deadzone"></path>
+            <g id="spotgauge-ticks"></g>
+            <g id="spotgauge-numbers"></g>
+            <g id="spotgauge-thresholds"></g>
+            <text id="spotgauge-target" class="spotgauge-target" x="110" y="13" text-anchor="middle">--</text>
+            <line id="spotgauge-needle" class="spotgauge-needle" x1="110" y1="110" x2="110" y2="110"></line>
+            <circle id="spotgauge-pivot" class="gauge-pivot" cx="110" cy="110" r="6"></circle>
+            <text id="spotgauge-spot" class="gauge-readout" x="110" y="152" text-anchor="middle">--</text>
+            <text id="spotgauge-gap" class="gauge-readout-sub spotgauge-gap" x="110" y="175" text-anchor="middle">--</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="panel updown-panel">
+        <div class="gauge-wrap">
+          <svg id="updowngauge-svg" class="gauge-svg" viewBox="0 0 220 190">
+            <path id="updowngauge-track-red" class="spotgauge-track-red"></path>
+            <path id="updowngauge-track-green" class="spotgauge-track-green"></path>
+            <g id="updowngauge-ticks"></g>
+            <g id="updowngauge-numbers"></g>
+            <text class="spotgauge-target" x="110" y="13" text-anchor="middle">UP / DOWN</text>
+            <line id="updowngauge-needle" class="spotgauge-needle" x1="110" y1="110" x2="110" y2="110"></line>
+            <circle class="gauge-pivot" cx="110" cy="110" r="6"></circle>
+            <text id="updowngauge-up" class="gauge-readout" x="110" y="152" text-anchor="middle">--</text>
+            <text id="updowngauge-down" class="updowngauge-down" x="110" y="175" text-anchor="middle">--</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="panel momentum-panel">
+        <div class="gauge-wrap">
+          <svg id="momgauge-svg" class="gauge-svg" viewBox="0 0 220 190">
+            <path id="momgauge-track-red" class="spotgauge-track-red"></path>
+            <path id="momgauge-track-green" class="spotgauge-track-green"></path>
+            <g id="momgauge-ticks"></g>
+            <g id="momgauge-numbers"></g>
+            <text class="spotgauge-target" x="110" y="13" text-anchor="middle">MOMENTUM</text>
+            <line id="momgauge-needle" class="spotgauge-needle" x1="110" y1="110" x2="110" y2="110"></line>
+            <circle class="gauge-pivot" cx="110" cy="110" r="6"></circle>
+            <text id="momgauge-pct" class="gauge-readout" x="110" y="152" text-anchor="middle">--</text>
+            <text id="momgauge-dir" class="momgauge-dir" x="110" y="175" text-anchor="middle">30s</text>
+          </svg>
+        </div>
       </div>
     </div>
 
@@ -84,6 +163,67 @@
         </label>
       </div>
       <div id="log-view" class="log-view"><div class="log-empty">Waiting for log data...</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== SIMULATOR ===================== -->
+  <section id="tab-simulator" class="tab-panel">
+    <div class="config-header">
+      <p class="config-note">Replays the strategy currently saved in <code>config.yaml</code> against the recorded tick files in <code>./data</code> - the exact same sizing/hedge/scoring logic a live run uses, just against the past instead of live prices.</p>
+      <button id="btn-run-sim" class="btn btn-save">Run Simulation</button>
+      <span id="sim-run-status" class="save-status"></span>
+    </div>
+
+    <div class="panel sim-chart-panel">
+      <div class="panel-header">
+        <span id="sim-chart-range">No tick data loaded yet</span>
+        <div class="sim-chart-nav">
+          <button type="button" id="sim-chart-prev" class="btn sim-nav-btn">&laquo; Older</button>
+          <button type="button" id="sim-chart-next" class="btn sim-nav-btn">Newer &raquo;</button>
+        </div>
+      </div>
+      <canvas id="sim-chart-canvas" class="sim-chart-canvas"></canvas>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Sim Bets</div>
+        <div id="sim-stat-bets" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Sim Record</div>
+        <div id="sim-stat-record" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Win Rate</div>
+        <div id="sim-stat-winrate" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Sim PnL</div>
+        <div id="sim-stat-pnl" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Max Drawdown</div>
+        <div id="sim-stat-drawdown" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Cumulative Loss</div>
+        <div id="sim-stat-cumloss" class="stat-value">-</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Final Stake</div>
+        <div id="sim-stat-stake" class="stat-value">-</div>
+      </div>
+    </div>
+
+    <div class="panel log-panel">
+      <div class="panel-header">
+        <span>Simulation Log</span>
+        <label class="autoscroll-toggle">
+          <input type="checkbox" id="sim-autoscroll" checked> Auto-scroll
+        </label>
+      </div>
+      <div id="sim-log-view" class="log-view"><div class="log-empty">Run a simulation to see log output here.</div></div>
     </div>
   </section>
 
@@ -168,6 +308,8 @@
             <option value="contracts">contracts - classic martingale</option>
             <option value="dollars">dollars - fixed $ amount</option>
             <option value="recovery">recovery - price-aware martingale</option>
+            <option value="dalembert">dalembert - +/-1 unit per loss/win</option>
+            <option value="anti_martingale">anti_martingale - grows on wins, resets on loss</option>
           </select>
         </div>
         <div class="field row2">
@@ -194,6 +336,33 @@
           <div class="field">
             <label>Max stake</label>
             <input type="number" id="sizing_max_stake" step="1" min="1">
+          </div>
+        </div>
+        <div class="subpanel" id="dalembertFields">
+          <div class="field">
+            <label>Unit size (contracts)</label>
+            <input type="number" id="sizing_dalembert_unit" step="1" min="1">
+          </div>
+          <div class="help">+1 unit after a loss, -1 unit after a win (floored at base size, capped at max stake).</div>
+        </div>
+        <div class="subpanel" id="antiMartingaleFields">
+          <div class="field">
+            <label>Variant</label>
+            <div class="seg" id="amVariantSeg">
+              <button type="button" data-val="plus">+1 per win</button>
+              <button type="button" data-val="multiplier">x2 per win</button>
+            </div>
+            <div class="help">Grows the stake while winning (pressing a streak) instead of after a loss. Either way, resets straight to base size the moment a bet loses - no loss-streak compounding.</div>
+          </div>
+          <div class="field row2" style="margin-top:10px;">
+            <div>
+              <label>Unit (+1 mode)</label>
+              <input type="number" id="am_unit" step="1" min="1">
+            </div>
+            <div>
+              <label>Multiplier (x2 mode)</label>
+              <input type="number" id="am_multiplier" step="0.1" min="1">
+            </div>
           </div>
         </div>
         <div class="subpanel" id="recoveryFields">
@@ -294,6 +463,98 @@
         </div>
       </div>
 
+      <div class="card">
+        <h3><span class="n">07</span> Live Tick Recording</h3>
+        <div class="field">
+          <div class="switch-row">
+            <div class="txt">
+              <div class="t">Enabled</div>
+              <div class="d">Background logger, independent of strategy/mode</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="lt_enabled">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </div>
+        <div class="field row2">
+          <div>
+            <label>Interval (sec)</label>
+            <input type="number" id="lt_interval_sec" step="1" min="1">
+          </div>
+        </div>
+          <div class="switch-row">
+            <label>New file per window</label>
+            <div class="switch-row" style="margin-top:6px;">
+              <label class="switch">
+                <input type="checkbox" id="lt_new_file_per_session">
+                <span class="track"></span><span class="knob"></span>
+              </label>
+            </div>
+          </div>
+        
+        <div class="field">
+          <label>Output file</label>
+          <input type="text" id="lt_file">
+        </div>
+      </div>
+
+      <div class="card">
+        <h3><span class="n">08</span> Hedge</h3>
+        <div class="field">
+          <div class="switch-row">
+            <div class="txt">
+              <div class="t">Enable hedging</div>
+              <div class="d">Opposing bet if BTC crosses back mid-window - works with whichever strategy is active below, not just spot_lean</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="hedge_enabled">
+              <span class="track"></span><span class="knob"></span>
+            </label>
+          </div>
+        </div>
+        <div class="subpanel dimmed" id="hedgeSub">
+          <div class="field row2">
+            <div>
+              <label>Threshold (%)</label>
+              <input type="number" id="hedge_threshold_pct" step="0.01" min="0">
+            </div>
+            <div>
+              <label>Max hedges / window</label>
+              <input type="number" id="hedge_max_hedges_per_window" step="1" min="1">
+            </div>
+          </div>
+          <div class="field">
+            <div class="switch-row">
+              <div class="txt"><div class="t">Fresh-start only</div></div>
+              <label class="switch"><input type="checkbox" id="hedge_fresh_start_only"><span class="track"></span><span class="knob"></span></label>
+            </div>
+          </div>
+          <div class="field">
+            <div class="switch-row">
+              <div class="txt"><div class="t">Net-session sizing</div></div>
+              <label class="switch"><input type="checkbox" id="hedge_net_session_sizing"><span class="track"></span><span class="knob"></span></label>
+            </div>
+          </div>
+          <div class="field">
+            <div class="switch-row">
+              <div class="txt"><div class="t">Smart sizing</div></div>
+              <label class="switch"><input type="checkbox" id="hedge_smart_sizing"><span class="track"></span><span class="knob"></span></label>
+            </div>
+          </div>
+          <div class="field row2" style="margin-top:6px;">
+            <div>
+              <label>Min profit (c)</label>
+              <input type="number" id="hedge_min_profit_cents" step="1" min="0">
+            </div>
+            <div>
+              <label>Max contracts</label>
+              <input type="number" id="hedge_max_contracts" step="1" min="1">
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <div class="block-title">Strategy</div>
@@ -361,61 +622,6 @@
           <div class="field">
             <label>Spot poll interval (sec)</label>
             <input type="number" id="sl_poll_interval_sec" step="1" min="1">
-          </div>
-        </div>
-        <div class="card">
-          <h3>Hedge</h3>
-          <div class="field">
-            <div class="switch-row">
-              <div class="txt">
-                <div class="t">Enable hedging</div>
-                <div class="d">Opposing bet if BTC crosses back mid-window</div>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="hedge_enabled">
-                <span class="track"></span><span class="knob"></span>
-              </label>
-            </div>
-          </div>
-          <div class="subpanel dimmed" id="hedgeSub">
-            <div class="field row2">
-              <div>
-                <label>Threshold (%)</label>
-                <input type="number" id="hedge_threshold_pct" step="0.01" min="0">
-              </div>
-              <div>
-                <label>Max hedges / window</label>
-                <input type="number" id="hedge_max_hedges_per_window" step="1" min="1">
-              </div>
-            </div>
-            <div class="field">
-              <div class="switch-row">
-                <div class="txt"><div class="t">Fresh-start only</div></div>
-                <label class="switch"><input type="checkbox" id="hedge_fresh_start_only"><span class="track"></span><span class="knob"></span></label>
-              </div>
-            </div>
-            <div class="field">
-              <div class="switch-row">
-                <div class="txt"><div class="t">Net-session sizing</div></div>
-                <label class="switch"><input type="checkbox" id="hedge_net_session_sizing"><span class="track"></span><span class="knob"></span></label>
-              </div>
-            </div>
-            <div class="field">
-              <div class="switch-row">
-                <div class="txt"><div class="t">Smart sizing</div></div>
-                <label class="switch"><input type="checkbox" id="hedge_smart_sizing"><span class="track"></span><span class="knob"></span></label>
-              </div>
-            </div>
-            <div class="field row2" style="margin-top:6px;">
-              <div>
-                <label>Min profit (c)</label>
-                <input type="number" id="hedge_min_profit_cents" step="1" min="0">
-              </div>
-              <div>
-                <label>Max contracts</label>
-                <input type="number" id="hedge_max_contracts" step="1" min="1">
-              </div>
-            </div>
           </div>
         </div>
       </div>
