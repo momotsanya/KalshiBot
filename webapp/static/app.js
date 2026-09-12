@@ -1,3 +1,4 @@
+// V1.3
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -133,7 +134,442 @@ async function refreshState() {
     document.getElementById("stat-cumloss").textContent = fmtDollars(s.cumulative_loss_cents || 0);
     document.getElementById("stat-drawdown").textContent = fmtDollars(s.max_drawdown_cents || 0);
     document.getElementById("stat-stake").textContent = s.current_stake != null ? s.current_stake : "-";
-    document.getElementById("stat-chop").textContent = s.skipped_chop || 0;
+    document.getElementById("stat-recovery-attempts").textContent = s.recovery_attempts || 0;
+  } catch (e) {
+    // transient - next poll retries
+  }
+}
+
+// ============================================================
+// Monitor: session (current 15-min window) time gauge
+// ============================================================
+const WINDOW_MIN = 15;
+const GAUGE_CX = 110, GAUGE_CY = 110, GAUGE_R = 78;
+const GAUGE_START_ANGLE = 135;   // degrees - bottom-left
+const GAUGE_END_ANGLE = 405;     // degrees (=45) - bottom-right, 270deg total sweep
+const NEEDLE_LEN = 68;
+
+function gaugePolar(cx, cy, r, angleDeg) {
+  const rad = (angleDeg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
+}
+function gaugeArcPath(cx, cy, r, startAngle, endAngle) {
+  const start = gaugePolar(cx, cy, r, startAngle);
+  const end = gaugePolar(cx, cy, r, endAngle);
+  const largeArc = endAngle - startAngle <= 180 ? "0" : "1";
+  return `M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${r} ${r} 0 ${largeArc} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}`;
+}
+function gaugeValueToAngle(minutes) {
+  const clamped = Math.max(0, Math.min(WINDOW_MIN, minutes));
+  return GAUGE_START_ANGLE + (clamped / WINDOW_MIN) * (GAUGE_END_ANGLE - GAUGE_START_ANGLE);
+}
+
+function buildGaugeStatic() {
+  const track = document.getElementById("gauge-track");
+  if (!track) return; // gauge markup not present on this page
+  track.setAttribute("d", gaugeArcPath(GAUGE_CX, GAUGE_CY, GAUGE_R, GAUGE_START_ANGLE, GAUGE_END_ANGLE));
+
+  const ticksGroup = document.getElementById("gauge-ticks");
+  const numbersGroup = document.getElementById("gauge-numbers");
+  ticksGroup.innerHTML = "";
+  numbersGroup.innerHTML = "";
+
+  for (let m = 0; m <= WINDOW_MIN; m++) {
+    const isMajor = m % 3 === 0; // labeled ticks at 0,3,6,9,12,15 - minor ticks every 1 min
+    const angle = gaugeValueToAngle(m);
+    const outer = gaugePolar(GAUGE_CX, GAUGE_CY, GAUGE_R, angle);
+    const inner = gaugePolar(GAUGE_CX, GAUGE_CY, GAUGE_R - (isMajor ? 10 : 5), angle);
+
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", outer.x); tick.setAttribute("y1", outer.y);
+    tick.setAttribute("x2", inner.x); tick.setAttribute("y2", inner.y);
+    tick.setAttribute("class", isMajor ? "gauge-tick-major" : "gauge-tick-minor");
+    ticksGroup.appendChild(tick);
+
+    if (isMajor) {
+      const isExtreme = m === 0 || m === WINDOW_MIN;
+      const labelRadius = isExtreme ? GAUGE_R + 14 : GAUGE_R - 24;
+      const labelPos = gaugePolar(GAUGE_CX, GAUGE_CY, labelRadius, angle);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", labelPos.x); text.setAttribute("y", labelPos.y);
+      text.setAttribute("class", "gauge-number");
+      text.textContent = String(m);
+      numbersGroup.appendChild(text);
+    }
+  }
+}
+
+function updateGaugeBand(entryStartMin, entryEndMin) {
+  const band = document.getElementById("gauge-band");
+  const before = document.getElementById("gauge-band-before");
+  const after = document.getElementById("gauge-band-after");
+  const sub = document.getElementById("timegauge-min");
+  if (!band) return;
+  if (entryStartMin == null || entryEndMin == null || entryEndMin <= entryStartMin) {
+    band.setAttribute("d", "");
+    if (before) before.setAttribute("d", "");
+    if (after) after.setAttribute("d", "");
+    if (sub) sub.textContent = "of 15:00 window";
+    return;
+  }
+  const startAngle = gaugeValueToAngle(entryStartMin);
+  const endAngle = gaugeValueToAngle(entryEndMin);
+  band.setAttribute("d", gaugeArcPath(GAUGE_CX, GAUGE_CY, GAUGE_R, startAngle, endAngle));
+
+  // Red before entry_start_min and after entry_end_min - the parts of the
+  // window the bot will NOT place a bet in - flanking the green entry band.
+  if (before) {
+    before.setAttribute(
+      "d",
+      entryStartMin > 0 ? gaugeArcPath(GAUGE_CX, GAUGE_CY, GAUGE_R, GAUGE_START_ANGLE, startAngle) : "",
+    );
+  }
+  if (after) {
+    after.setAttribute(
+      "d",
+      entryEndMin < WINDOW_MIN ? gaugeArcPath(GAUGE_CX, GAUGE_CY, GAUGE_R, endAngle, GAUGE_END_ANGLE) : "",
+    );
+  }
+
+  if (sub) sub.textContent = `${entryStartMin} - ${entryEndMin} min`;
+}
+
+function updateSessionGauge() {
+  const now = new Date();
+  const elapsedSec = (now.getMinutes() % WINDOW_MIN) * 60 + now.getSeconds();
+  const elapsedMin = elapsedSec / 60;
+
+  const tip = gaugePolar(GAUGE_CX, GAUGE_CY, NEEDLE_LEN, gaugeValueToAngle(elapsedMin));
+  const needle = document.getElementById("gauge-needle");
+  if (needle) { needle.setAttribute("x2", tip.x); needle.setAttribute("y2", tip.y); }
+
+  const mm = Math.floor(elapsedSec / 60).toString().padStart(2, "0");
+  const ss = (elapsedSec % 60).toString().padStart(2, "0");
+  const readout = document.getElementById("gauge-readout");
+  if (readout) readout.textContent = `${mm}:${ss}`;
+}
+
+// ============================================================
+// Monitor: spot-lean gauge (Target price / CF Benchmarks spot / gap %)
+// ============================================================
+// Semicircle across the TOP of the dial only: left=180deg (red, spot below
+// target), top=270deg (target price itself, gap=0), right=360deg (green,
+// spot above target) - so the needle visually leans left/right of the
+// target price exactly the way strategy.decide_spot_lean_side() decides a
+// side. Unlike the session gauge, the numeric scale isn't fixed (a 0.02%
+// gap and a 0.30% gap are both plausible) so the +/- range auto-grows to
+// fit whatever's actually been seen, instead of clipping the needle.
+const SPOTGAUGE_CX = 110, SPOTGAUGE_CY = 110, SPOTGAUGE_R = 78;
+const SPOTGAUGE_START_ANGLE = 135;  // matches the session gauge's 270deg sweep for visual consistency
+const SPOTGAUGE_END_ANGLE = 405;
+const SPOTGAUGE_CENTER_ANGLE = (SPOTGAUGE_START_ANGLE + SPOTGAUGE_END_ANGLE) / 2; // 270 = straight up = target price / gap=0
+const SPOTGAUGE_NEEDLE_LEN = SPOTGAUGE_R - 10; // close to the tick radius, so crossing a threshold marker is visually obvious
+let spotGaugeMaxPct = 0.05;       // current +/- scale of the dial; only ever grows (see buildSpotGaugeScale)
+let spotGaugeThresholdPct = 0.02; // strategy.spot_lean.threshold_pct, mirrored from cfg
+
+// UP/DOWN price gauge + momentum-trend gauge share the spot-lean gauge's
+// geometry/constants (SPOTGAUGE_CX/CY/R, spotGaugeValueToAngle, etc.) below.
+let momGaugeMaxPct = 0.02;   // current +/- scale of the momentum dial; only ever grows
+let momLookbackSec = 30;     // strategy.momentum_filter.lookback_sec, mirrored from cfg
+let momPriceHistory = [];    // rolling client-side buffer: [{t: epoch_ms, p: price}, ...]
+
+function spotGaugeValueToAngle(pct, maxPct) {
+  const clamped = Math.max(-maxPct, Math.min(maxPct, pct));
+  const t = (clamped + maxPct) / (2 * maxPct);
+  return SPOTGAUGE_START_ANGLE + t * (SPOTGAUGE_END_ANGLE - SPOTGAUGE_START_ANGLE); // start (bottom-left) -> center (top) -> end (bottom-right)
+}
+
+function buildSpotGaugeScale(thresholdPct, lastGapPct) {
+  spotGaugeThresholdPct = thresholdPct != null ? thresholdPct : spotGaugeThresholdPct;
+  const desiredMax = Math.max(spotGaugeThresholdPct * 5, Math.abs(lastGapPct || 0) * 1.3, 0.05);
+  // Hysteresis: only rebuild (and only ever grow) the scale when the desired
+  // range meaningfully exceeds the current one, so a normal 1-tick jitter in
+  // the live gap doesn't constantly redraw/rescale the whole dial.
+  if (desiredMax <= spotGaugeMaxPct * 1.02) return;
+  spotGaugeMaxPct = desiredMax;
+
+  const maxPct = spotGaugeMaxPct;
+  const decimals = maxPct < 0.05 ? 3 : 2;
+
+  const redTrack = document.getElementById("spotgauge-track-red");
+  const greenTrack = document.getElementById("spotgauge-track-green");
+  if (!redTrack || !greenTrack) return; // widget not present on this page
+  redTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_START_ANGLE, SPOTGAUGE_CENTER_ANGLE));
+  greenTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_CENTER_ANGLE, SPOTGAUGE_END_ANGLE));
+
+  const deadzone = document.getElementById("spotgauge-deadzone");
+  const dzStart = spotGaugeValueToAngle(-spotGaugeThresholdPct, maxPct);
+  const dzEnd = spotGaugeValueToAngle(spotGaugeThresholdPct, maxPct);
+  deadzone.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, dzStart, dzEnd));
+
+  const ticksGroup = document.getElementById("spotgauge-ticks");
+  const numbersGroup = document.getElementById("spotgauge-numbers");
+  ticksGroup.innerHTML = "";
+  numbersGroup.innerHTML = "";
+  const fractions = [-1, -0.75, -0.5, -0.25, 0, 0.25, 0.5, 0.75, 1];
+  for (const frac of fractions) {
+    const value = frac * maxPct;
+    const isMajor = frac === -1 || frac === -0.5 || frac === 0.5 || frac === 1;
+    const isCenter = frac === 0;
+    const angle = spotGaugeValueToAngle(value, maxPct);
+    const outer = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, angle);
+    const inner = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R - (isMajor || isCenter ? 12 : 6), angle);
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", outer.x); tick.setAttribute("y1", outer.y);
+    tick.setAttribute("x2", inner.x); tick.setAttribute("y2", inner.y);
+    tick.setAttribute("class", isCenter ? "spotgauge-tick-center" : (isMajor ? "spotgauge-tick-major" : "spotgauge-tick-minor"));
+    ticksGroup.appendChild(tick);
+
+    if (isMajor) {
+      const isExtreme = frac === -1 || frac === 1;
+      const labelRadius = isExtreme ? SPOTGAUGE_R + 14 : SPOTGAUGE_R - 24;
+      const labelPos = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, labelRadius, angle);
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", labelPos.x); text.setAttribute("y", labelPos.y);
+      text.setAttribute("class", "spotgauge-number");
+      text.textContent = (value > 0 ? "+" : "") + value.toFixed(decimals);
+      numbersGroup.appendChild(text);
+    }
+  }
+
+  const thresholdsGroup = document.getElementById("spotgauge-thresholds");
+  thresholdsGroup.innerHTML = "";
+  for (const sign of [-1, 1]) {
+    const value = sign * spotGaugeThresholdPct;
+    const angle = spotGaugeValueToAngle(value, maxPct);
+    const outer = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R + 5, angle);
+    const inner = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R - 14, angle);
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", outer.x); tick.setAttribute("y1", outer.y);
+    tick.setAttribute("x2", inner.x); tick.setAttribute("y2", inner.y);
+    tick.setAttribute("class", "spotgauge-threshold-tick");
+    thresholdsGroup.appendChild(tick);
+
+    const labelPos = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R + 16, angle);
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", labelPos.x); text.setAttribute("y", labelPos.y);
+    text.setAttribute("class", "spotgauge-threshold-label");
+    text.textContent = spotGaugeThresholdPct.toFixed(decimals);
+    thresholdsGroup.appendChild(text);
+  }
+}
+
+function fmtUsd(value) {
+  return value == null ? "--" : "$" + value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function updateSpotGaugeReadouts(targetPrice, spotPrice, gapPct) {
+  const needle = document.getElementById("spotgauge-needle");
+  const targetEl = document.getElementById("spotgauge-target");
+  const spotEl = document.getElementById("spotgauge-spot");
+  const gapEl = document.getElementById("spotgauge-gap");
+  if (!needle) return; // widget not present on this page
+
+  if (targetEl) targetEl.textContent = fmtUsd(targetPrice);
+  if (spotEl) spotEl.textContent = fmtUsd(spotPrice);
+
+  if (gapPct == null) {
+    if (gapEl) { gapEl.textContent = "--"; gapEl.classList.remove("pos", "neg"); }
+    needle.classList.remove("signal-up", "signal-down");
+    const center = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, SPOTGAUGE_CENTER_ANGLE);
+    needle.setAttribute("x2", center.x); needle.setAttribute("y2", center.y);
+    return;
+  }
+
+  const tip = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, spotGaugeValueToAngle(gapPct, spotGaugeMaxPct));
+  needle.setAttribute("x2", tip.x); needle.setAttribute("y2", tip.y);
+  needle.classList.toggle("signal-up", gapPct > spotGaugeThresholdPct);
+  needle.classList.toggle("signal-down", gapPct < -spotGaugeThresholdPct);
+
+  if (gapEl) {
+    gapEl.textContent = (gapPct > 0 ? "+" : "") + gapPct.toFixed(3) + "%";
+    gapEl.classList.toggle("pos", gapPct > 0);
+    gapEl.classList.toggle("neg", gapPct < 0);
+  }
+}
+
+// ============================================================
+// Monitor: UP/DOWN price gauge (fixed 0-100c scale)
+// ============================================================
+function buildUpDownGaugeStatic() {
+  const redTrack = document.getElementById("updowngauge-track-red");
+  const greenTrack = document.getElementById("updowngauge-track-green");
+  if (!redTrack || !greenTrack) return; // widget not present on this page
+  redTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_START_ANGLE, SPOTGAUGE_CENTER_ANGLE));
+  greenTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_CENTER_ANGLE, SPOTGAUGE_END_ANGLE));
+
+  const ticksGroup = document.getElementById("updowngauge-ticks");
+  const numbersGroup = document.getElementById("updowngauge-numbers");
+  ticksGroup.innerHTML = "";
+  numbersGroup.innerHTML = "";
+  // Fixed scale: 0c (fully DOWN-favored) .. 50c (even) .. 100c (fully UP-favored).
+  // Reuses spotGaugeValueToAngle's -maxPct..+maxPct mapping with maxPct=50 by
+  // centering the cents value on 50 (cents - 50).
+  for (const cents of [0, 25, 50, 75, 100]) {
+    const pct = cents - 50;
+    const isCenter = cents === 50;
+    const angle = spotGaugeValueToAngle(pct, 50);
+    const outer = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, angle);
+    const inner = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R - (isCenter ? 12 : 10), angle);
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", outer.x); tick.setAttribute("y1", outer.y);
+    tick.setAttribute("x2", inner.x); tick.setAttribute("y2", inner.y);
+    tick.setAttribute("class", isCenter ? "spotgauge-tick-center" : "spotgauge-tick-major");
+    ticksGroup.appendChild(tick);
+
+    const isExtreme = cents === 0 || cents === 100;
+    const labelRadius = isExtreme ? SPOTGAUGE_R + 14 : SPOTGAUGE_R - 24;
+    const labelPos = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, labelRadius, angle);
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", labelPos.x); text.setAttribute("y", labelPos.y);
+    text.setAttribute("class", "spotgauge-number");
+    text.textContent = cents + "c";
+    numbersGroup.appendChild(text);
+  }
+}
+
+function updateUpDownGauge(upCents, downCents) {
+  const needle = document.getElementById("updowngauge-needle");
+  const upEl = document.getElementById("updowngauge-up");
+  const downEl = document.getElementById("updowngauge-down");
+  if (!needle) return; // widget not present on this page
+
+  if (upCents == null) {
+    needle.classList.remove("signal-up", "signal-down");
+    const center = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, SPOTGAUGE_CENTER_ANGLE);
+    needle.setAttribute("x2", center.x); needle.setAttribute("y2", center.y);
+    if (upEl) upEl.textContent = "--";
+    if (downEl) downEl.textContent = "--";
+    return;
+  }
+
+  const tip = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, spotGaugeValueToAngle(upCents - 50, 50));
+  needle.setAttribute("x2", tip.x); needle.setAttribute("y2", tip.y);
+  needle.classList.toggle("signal-up", upCents > 50);
+  needle.classList.toggle("signal-down", upCents < 50);
+
+  if (upEl) upEl.textContent = `UP ${upCents}c`;
+  if (downEl) downEl.textContent = downCents != null ? `DOWN ${downCents}c` : "--";
+}
+
+// ============================================================
+// Monitor: momentum-filter trend gauge (auto-growing %, like spot-lean)
+// ============================================================
+// Approximates strategy.check_momentum_filter()'s short-term trend using a
+// client-side rolling buffer of CF Benchmarks spot samples (same feed the
+// spot-lean gauge already reads from /api/live_tick), over the configured
+// momentum_filter.lookback_sec window. This mirrors the bot's own
+// oldest-vs-newest-in-window comparison, but is computed here in the
+// browser rather than read from the bot process, so treat it as indicative
+// rather than the exact live value the bot acted on for any given poll.
+function buildMomGaugeScale(lastPct) {
+  const desiredMax = Math.max(Math.abs(lastPct || 0) * 1.3, 0.02);
+  // Hysteresis: only grow the scale, and only when meaningfully exceeded -
+  // same rationale as buildSpotGaugeScale (avoid constant redraw on jitter).
+  if (desiredMax <= momGaugeMaxPct * 1.02) return;
+  momGaugeMaxPct = desiredMax;
+
+  const maxPct = momGaugeMaxPct;
+  const decimals = maxPct < 0.05 ? 3 : 2;
+
+  const redTrack = document.getElementById("momgauge-track-red");
+  const greenTrack = document.getElementById("momgauge-track-green");
+  if (!redTrack || !greenTrack) return; // widget not present on this page
+  redTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_START_ANGLE, SPOTGAUGE_CENTER_ANGLE));
+  greenTrack.setAttribute("d", gaugeArcPath(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, SPOTGAUGE_CENTER_ANGLE, SPOTGAUGE_END_ANGLE));
+
+  const ticksGroup = document.getElementById("momgauge-ticks");
+  const numbersGroup = document.getElementById("momgauge-numbers");
+  ticksGroup.innerHTML = "";
+  numbersGroup.innerHTML = "";
+  for (const frac of [-1, -0.5, 0, 0.5, 1]) {
+    const value = frac * maxPct;
+    const isCenter = frac === 0;
+    const angle = spotGaugeValueToAngle(value, maxPct);
+    const outer = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R, angle);
+    const inner = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_R - (isCenter ? 12 : 10), angle);
+    const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    tick.setAttribute("x1", outer.x); tick.setAttribute("y1", outer.y);
+    tick.setAttribute("x2", inner.x); tick.setAttribute("y2", inner.y);
+    tick.setAttribute("class", isCenter ? "spotgauge-tick-center" : "spotgauge-tick-major");
+    ticksGroup.appendChild(tick);
+
+    const isExtreme = frac === -1 || frac === 1;
+    const labelRadius = isExtreme ? SPOTGAUGE_R + 14 : SPOTGAUGE_R - 24;
+    const labelPos = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, labelRadius, angle);
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", labelPos.x); text.setAttribute("y", labelPos.y);
+    text.setAttribute("class", "spotgauge-number");
+    text.textContent = (value > 0 ? "+" : "") + value.toFixed(decimals);
+    numbersGroup.appendChild(text);
+  }
+}
+
+function updateMomGaugeReadouts(pct) {
+  const needle = document.getElementById("momgauge-needle");
+  const pctEl = document.getElementById("momgauge-pct");
+  const dirEl = document.getElementById("momgauge-dir");
+  if (!needle) return; // widget not present on this page
+
+  if (pct == null) {
+    needle.classList.remove("signal-up", "signal-down");
+    const center = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, SPOTGAUGE_CENTER_ANGLE);
+    needle.setAttribute("x2", center.x); needle.setAttribute("y2", center.y);
+    if (pctEl) { pctEl.textContent = "--"; pctEl.classList.remove("pos", "neg"); }
+    if (dirEl) dirEl.textContent = `${momLookbackSec}s`;
+    return;
+  }
+
+  const tip = gaugePolar(SPOTGAUGE_CX, SPOTGAUGE_CY, SPOTGAUGE_NEEDLE_LEN, spotGaugeValueToAngle(pct, momGaugeMaxPct));
+  needle.setAttribute("x2", tip.x); needle.setAttribute("y2", tip.y);
+  needle.classList.toggle("signal-up", pct > 0);
+  needle.classList.toggle("signal-down", pct < 0);
+
+  if (pctEl) {
+    pctEl.textContent = (pct > 0 ? "+" : "") + pct.toFixed(3) + "%";
+    pctEl.classList.toggle("pos", pct > 0);
+    pctEl.classList.toggle("neg", pct < 0);
+  }
+  if (dirEl) dirEl.textContent = `${momLookbackSec}s: ` + (pct > 0 ? "UP" : pct < 0 ? "DOWN" : "FLAT");
+}
+
+function updateMomentumBuffer(spot) {
+  if (spot == null) return; // no fresh sample this tick - leave the buffer/readout as-is
+  const now = Date.now();
+  momPriceHistory.push({ t: now, p: spot });
+  const cutoff = now - momLookbackSec * 1000;
+  momPriceHistory = momPriceHistory.filter((s) => s.t >= cutoff);
+
+  if (momPriceHistory.length < 2) {
+    updateMomGaugeReadouts(null);
+    return;
+  }
+  const oldest = momPriceHistory[0].p;
+  const newest = momPriceHistory[momPriceHistory.length - 1].p;
+  const pct = ((newest - oldest) / oldest) * 100;
+  buildMomGaugeScale(pct);
+  updateMomGaugeReadouts(pct);
+}
+
+async function refreshLiveTickGauges() {
+  try {
+    const res = await fetch("/api/live_tick");
+    if (!res.ok) return;
+    const tick = await res.json();
+    if (!tick.exists) {
+      updateSpotGaugeReadouts(null, null, null);
+      updateUpDownGauge(null, null);
+      updateMomentumBuffer(null);
+      return;
+    }
+    const target = tick.kalshi_strike_usd;
+    const spot = tick.btc_spot_cfbenchmarks;
+    const gapPct = (target && spot) ? ((spot - target) / target) * 100 : null;
+    if (gapPct != null) buildSpotGaugeScale(spotGaugeThresholdPct, gapPct);
+    updateSpotGaugeReadouts(target ?? null, spot ?? null, gapPct);
+
+    updateUpDownGauge(tick.kalshi_up_price_cents ?? null, tick.kalshi_down_price_cents ?? null);
+    updateMomentumBuffer(spot ?? null);
   } catch (e) {
     // transient - next poll retries
   }
@@ -153,6 +589,7 @@ function classifyLogLine(line) {
   if (/\[WARNING\]/.test(line)) return "line-warning";
   if (/ORDER PLACED/.test(line)) return "line-order";
   if (/New window/.test(line)) return "line-window";
+  if (/SESSION NET/.test(line)) return "line-window";
   return "line-info";
 }
 
@@ -278,6 +715,9 @@ function wireConfigFields() {
   bindField("sizing_martingale_multiplier", ["sizing", "martingale_multiplier"], "number");
   bindField("sizing_max_martingale_steps", ["sizing", "max_martingale_steps"], "number");
   bindField("sizing_max_stake", ["sizing", "max_stake"], "number");
+  bindField("sizing_dalembert_unit", ["sizing", "dalembert_unit"], "number");
+  bindField("am_unit", ["sizing", "anti_martingale", "unit"], "number");
+  bindField("am_multiplier", ["sizing", "anti_martingale", "multiplier"], "number");
 
   bindField("recovery_min_profit_cents", ["recovery", "min_profit_cents"], "number");
   bindField("recovery_max_contracts", ["recovery", "max_contracts"], "number");
@@ -304,20 +744,33 @@ function wireConfigFields() {
   bindField("sl_threshold_pct", ["strategy", "spot_lean", "threshold_pct"], "number");
   bindField("sl_poll_interval_sec", ["strategy", "spot_lean", "poll_interval_sec"], "number");
 
-  bindField("hedge_enabled", ["strategy", "spot_lean", "hedge", "enabled"], "toggle");
-  bindField("hedge_threshold_pct", ["strategy", "spot_lean", "hedge", "threshold_pct"], "number");
-  bindField("hedge_max_hedges_per_window", ["strategy", "spot_lean", "hedge", "max_hedges_per_window"], "number");
-  bindField("hedge_fresh_start_only", ["strategy", "spot_lean", "hedge", "fresh_start_only"], "toggle");
-  bindField("hedge_net_session_sizing", ["strategy", "spot_lean", "hedge", "net_session_sizing"], "toggle");
-  bindField("hedge_smart_sizing", ["strategy", "spot_lean", "hedge", "smart_sizing"], "toggle");
-  bindField("hedge_min_profit_cents", ["strategy", "spot_lean", "hedge", "min_profit_cents"], "number");
-  bindField("hedge_max_contracts", ["strategy", "spot_lean", "hedge", "max_contracts"], "number");
+  bindField("hedge_enabled", ["strategy", "hedge", "enabled"], "toggle");
+  bindField("hedge_threshold_pct", ["strategy", "hedge", "threshold_pct"], "number");
+  bindField("hedge_max_hedges_per_window", ["strategy", "hedge", "max_hedges_per_window"], "number");
+  bindField("hedge_fresh_start_only", ["strategy", "hedge", "fresh_start_only"], "toggle");
+  bindField("hedge_net_session_sizing", ["strategy", "hedge", "net_session_sizing"], "toggle");
+  bindField("hedge_smart_sizing", ["strategy", "hedge", "smart_sizing"], "toggle");
+  bindField("hedge_min_profit_cents", ["strategy", "hedge", "min_profit_cents"], "number");
+  bindField("hedge_max_contracts", ["strategy", "hedge", "max_contracts"], "number");
+
+  bindField("lt_enabled", ["live_tick", "enabled"], "toggle");
+  bindField("lt_interval_sec", ["live_tick", "interval_sec"], "number");
+  bindField("lt_file", ["live_tick", "file"], "text");
+  bindField("lt_new_file_per_session", ["live_tick", "new_file_per_session"], "toggle");
 
   document.querySelectorAll("#envSeg button").forEach((btn) => {
     btn.addEventListener("click", () => {
       currentEnv = btn.dataset.val;
       setPath(cfg, ["kalshi", "base_url"], BASE_URLS[currentEnv]);
       renderEnvSeg();
+      onConfigFieldChanged();
+    });
+  });
+
+  document.querySelectorAll("#amVariantSeg button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setPath(cfg, ["sizing", "anti_martingale", "variant"], btn.dataset.val);
+      renderAmVariantSeg();
       onConfigFieldChanged();
     });
   });
@@ -344,6 +797,11 @@ function renderEnvSeg() {
   document.querySelectorAll("#envSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === currentEnv));
 }
 
+function renderAmVariantSeg() {
+  const variant = getPath(cfg, ["sizing", "anti_martingale", "variant"]) || "plus";
+  document.querySelectorAll("#amVariantSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === variant));
+}
+
 function renderModeState() {
   const mode = getPath(cfg, ["strategy", "mode"]);
   document.querySelectorAll(".strategy-tab").forEach((t) => t.classList.toggle("is-selected", t.dataset.tab === mode));
@@ -355,14 +813,18 @@ function renderModeState() {
 }
 
 function renderSizingVisibility() {
-  const isRecovery = getPath(cfg, ["sizing", "mode"]) === "recovery";
+  const mode = getPath(cfg, ["sizing", "mode"]);
+  const isRecovery = mode === "recovery";
+  const isDalembert = mode === "dalembert";
+  const isAntiMartingale = mode === "anti_martingale";
   document.getElementById("recoveryFields").classList.toggle("dimmed", !isRecovery);
-  document.getElementById("martingaleFields").style.opacity = isRecovery ? "0.4" : "1";
+  document.getElementById("dalembertFields").classList.toggle("dimmed", !isDalembert);
+  document.getElementById("antiMartingaleFields").classList.toggle("dimmed", !isAntiMartingale);
+  document.getElementById("martingaleFields").style.opacity = (isRecovery || isDalembert || isAntiMartingale) ? "0.4" : "1";
 }
 
 function renderHedgeVisibility() {
-  const enabled = !!getPath(cfg, ["strategy", "spot_lean", "hedge", "enabled"]);
-  const smart = !!getPath(cfg, ["strategy", "spot_lean", "hedge", "smart_sizing"]);
+  const enabled = !!getPath(cfg, ["strategy", "hedge", "enabled"]);
   document.getElementById("hedgeSub").classList.toggle("dimmed", !enabled);
 }
 
@@ -371,21 +833,46 @@ function renderDryRunStyling() {
   document.getElementById("dryrunCard").classList.toggle("is-live", !dryRun);
 }
 
+function renderEnvBadges() {
+  const dryRun = !!getPath(cfg, ["runtime", "dry_run"]);
+  const modeBadge = document.getElementById("env-mode-badge");
+  if (modeBadge) {
+    modeBadge.textContent = dryRun ? "DRY RUN" : "LIVE";
+    modeBadge.className = "badge " + (dryRun ? "badge-stopped" : "badge-crashed");
+  }
+
+  const baseUrl = getPath(cfg, ["kalshi", "base_url"]) || "";
+  const isDemo = baseUrl.includes("demo");
+  const nameBadge = document.getElementById("env-name-badge");
+  if (nameBadge) {
+    nameBadge.textContent = isDemo ? "DEMO" : "PRODUCTION";
+    nameBadge.className = "badge " + (isDemo ? "badge-stopped" : "badge-crashed");
+  }
+}
+
 function renderConfigDerived() {
   const baseUrl = getPath(cfg, ["kalshi", "base_url"]) || "";
   currentEnv = baseUrl.includes("demo") ? "demo" : "production";
   renderEnvSeg();
+  renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
   renderHedgeVisibility();
   renderDryRunStyling();
+  renderEnvBadges();
 }
 
 function onConfigFieldChanged() {
+  renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
   renderHedgeVisibility();
   renderDryRunStyling();
+  renderEnvBadges();
+  updateGaugeBand(getPath(cfg, ["strategy", "entry_start_min"]), getPath(cfg, ["strategy", "entry_end_min"]));
+  spotGaugeThresholdPct = getPath(cfg, ["strategy", "spot_lean", "threshold_pct"]) ?? spotGaugeThresholdPct;
+  buildSpotGaugeScale(spotGaugeThresholdPct, 0);
+  momLookbackSec = getPath(cfg, ["strategy", "momentum_filter", "lookback_sec"]) ?? momLookbackSec;
   const statusEl = document.getElementById("save-status");
   statusEl.textContent = "Unsaved changes";
   statusEl.className = "save-status";
@@ -401,6 +888,10 @@ async function loadConfig() {
   cfg = await res.json();
   applyFieldsFromConfig();
   renderConfigDerived();
+  updateGaugeBand(getPath(cfg, ["strategy", "entry_start_min"]), getPath(cfg, ["strategy", "entry_end_min"]));
+  spotGaugeThresholdPct = getPath(cfg, ["strategy", "spot_lean", "threshold_pct"]) ?? spotGaugeThresholdPct;
+  buildSpotGaugeScale(spotGaugeThresholdPct, 0);
+  momLookbackSec = getPath(cfg, ["strategy", "momentum_filter", "lookback_sec"]) ?? momLookbackSec;
 }
 
 document.getElementById("btn-save-config").addEventListener("click", async () => {
@@ -428,19 +919,258 @@ document.getElementById("btn-save-config").addEventListener("click", async () =>
 });
 
 // ============================================================
+// Simulator tab
+// ============================================================
+const SIM_CHART_COUNT = 20; // windows per chart page
+let simChartData = null;    // last-fetched chart chunk: {windows, ticks, total_windows, offset, start_index, end_index}
+let simMarkers = [];        // order markers from the most recent /api/simulator/run
+let simChartLoadedOnce = false;
+
+async function loadSimChart(offset) {
+  const rangeEl = document.getElementById("sim-chart-range");
+  try {
+    const res = await fetch(`/api/simulator/chart?offset=${offset}&count=${SIM_CHART_COUNT}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      rangeEl.textContent = data.error || "Could not load tick data.";
+      return;
+    }
+    simChartData = data;
+    renderSimChartRange();
+    drawSimChart(data, simMarkers);
+  } catch (e) {
+    rangeEl.textContent = "Could not reach the server.";
+  }
+}
+
+function renderSimChartRange() {
+  const rangeEl = document.getElementById("sim-chart-range");
+  const prevBtn = document.getElementById("sim-chart-prev");
+  const nextBtn = document.getElementById("sim-chart-next");
+  if (!simChartData || !simChartData.windows.length) {
+    rangeEl.textContent = "No tick data found - run the bot with live_tick.enabled: true first.";
+    prevBtn.disabled = true;
+    nextBtn.disabled = true;
+    return;
+  }
+  const first = new Date(simChartData.windows[0].open_time);
+  const last = new Date(simChartData.windows[simChartData.windows.length - 1].close_time);
+  const fmt = (d) => d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  rangeEl.textContent =
+    `${fmt(first)} \u2192 ${fmt(last)}  ` +
+    `(windows ${simChartData.start_index + 1}-${simChartData.end_index} of ${simChartData.total_windows})`;
+  prevBtn.disabled = simChartData.start_index <= 0;
+  nextBtn.disabled = simChartData.offset <= 0;
+}
+
+function drawSimChart(data, markers) {
+  const canvas = document.getElementById("sim-chart-canvas");
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = canvas.clientWidth || 800;
+  const cssHeight = canvas.clientHeight || 260;
+  canvas.width = Math.round(cssWidth * dpr);
+  canvas.height = Math.round(cssHeight * dpr);
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  const ticks = (data.ticks || []).filter((t) => t.spot != null);
+  if (!ticks.length) {
+    ctx.fillStyle = "#5C5F66";
+    ctx.font = "12px monospace";
+    ctx.fillText("No spot price data in this range.", 12, cssHeight / 2);
+    return;
+  }
+
+  const times = ticks.map((t) => new Date(t.t).getTime());
+  const spots = ticks.map((t) => t.spot);
+  const strikes = (data.windows || []).map((w) => w.strike).filter((s) => s != null);
+  const minT = Math.min(...times), maxT = Math.max(...times);
+  const allY = spots.concat(strikes);
+  const minY = Math.min(...allY), maxY = Math.max(...allY);
+  const padY = (maxY - minY) * 0.08 || 1;
+  const yLo = minY - padY, yHi = maxY + padY;
+
+  const padL = 62, padR = 12, padT = 10, padB = 10;
+  const plotW = Math.max(1, cssWidth - padL - padR);
+  const plotH = Math.max(1, cssHeight - padT - padB);
+  const xOf = (t) => padL + ((t - minT) / (maxT - minT || 1)) * plotW;
+  const yOf = (v) => padT + (1 - (v - yLo) / (yHi - yLo || 1)) * plotH;
+
+  // Window boundary gridlines + each window's own floor_strike as a flat
+  // reference segment - this is the line spot_lean bets against.
+  (data.windows || []).forEach((w) => {
+    const xStart = xOf(new Date(w.open_time).getTime());
+    ctx.strokeStyle = "#2B2E34";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xStart, padT);
+    ctx.lineTo(xStart, padT + plotH);
+    ctx.stroke();
+
+    if (w.strike != null) {
+      const xEnd = xOf(new Date(w.close_time).getTime());
+      const y = yOf(w.strike);
+      ctx.strokeStyle = "#7A5420";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(xStart, y);
+      ctx.lineTo(xEnd, y);
+      ctx.stroke();
+    }
+  });
+
+  // Live BTC spot price curve.
+  ctx.strokeStyle = "#E0982F";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ticks.forEach((t, i) => {
+    const x = xOf(new Date(t.t).getTime());
+    const y = yOf(t.spot);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = "#8A8D95";
+  ctx.font = "10px monospace";
+  ctx.fillText(`$${yHi.toFixed(0)}`, 4, padT + 8);
+  ctx.fillText(`$${yLo.toFixed(0)}`, 4, padT + plotH);
+
+  // Order markers from the last simulation run: green dot = UP (yes),
+  // red dot = DOWN (no), placed on the spot curve at the order's own time.
+  (markers || []).forEach((m) => {
+    const mt = new Date(m.time).getTime();
+    if (mt < minT || mt > maxT) return; // outside the currently-viewed chunk
+    let nearest = ticks[0];
+    let bestDiff = Infinity;
+    for (const t of ticks) {
+      const diff = Math.abs(new Date(t.t).getTime() - mt);
+      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
+    }
+    const x = xOf(mt);
+    const y = yOf(nearest.spot);
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = m.side === "yes" ? "#4FAE72" : "#DB5B52";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#16181C";
+    ctx.stroke();
+  });
+}
+
+function fmtSimDollars(v) {
+  return v == null || Number.isNaN(v) ? "-" : "$" + Number(v).toFixed(2);
+}
+
+function renderSimStats(stats, finalState) {
+  document.getElementById("sim-stat-bets").textContent = stats.bets ?? "-";
+  document.getElementById("sim-stat-record").textContent = `${stats.wins ?? 0}-${stats.losses ?? 0}`;
+  document.getElementById("sim-stat-winrate").textContent = stats.win_rate_pct != null ? `${stats.win_rate_pct}%` : "-";
+
+  const pnlEl = document.getElementById("sim-stat-pnl");
+  pnlEl.textContent = fmtSimDollars(stats.pnl_usd);
+  pnlEl.className = "stat-value " + (stats.pnl_usd > 0 ? "pos" : stats.pnl_usd < 0 ? "neg" : "");
+
+  document.getElementById("sim-stat-drawdown").textContent = fmtSimDollars(stats.max_drawdown_usd);
+
+  const cumLossEl = document.getElementById("sim-stat-cumloss");
+  cumLossEl.textContent = finalState && finalState.cumulative_loss_cents != null
+    ? fmtSimDollars(finalState.cumulative_loss_cents / 100) : "-";
+
+  document.getElementById("sim-stat-stake").textContent =
+    finalState && finalState.current_stake != null ? finalState.current_stake : "-";
+}
+
+function appendSimLogLines(lines) {
+  if (!lines || !lines.length) return;
+  const view = document.getElementById("sim-log-view");
+  const emptyNote = view.querySelector(".log-empty");
+  if (emptyNote) emptyNote.remove();
+  const frag = document.createDocumentFragment();
+  for (const line of lines) {
+    const div = document.createElement("div");
+    div.className = classifyLogLine(line);
+    div.textContent = line;
+    frag.appendChild(div);
+  }
+  view.appendChild(frag);
+  if (document.getElementById("sim-autoscroll").checked) {
+    view.scrollTop = view.scrollHeight;
+  }
+}
+
+function wireSimulatorTab() {
+  document.getElementById("sim-chart-prev").addEventListener("click", () => {
+    if (!simChartData) return;
+    loadSimChart(simChartData.offset + SIM_CHART_COUNT);
+  });
+  document.getElementById("sim-chart-next").addEventListener("click", () => {
+    if (!simChartData) return;
+    loadSimChart(Math.max(0, simChartData.offset - SIM_CHART_COUNT));
+  });
+
+  document.getElementById("btn-run-sim").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-run-sim");
+    const statusEl = document.getElementById("sim-run-status");
+    btn.disabled = true;
+    statusEl.textContent = "Running simulation...";
+    statusEl.className = "save-status";
+    try {
+      const res = await fetch("/api/simulator/run", { method: "POST" });
+      const data = await res.json();
+      if (!data.ok) {
+        statusEl.textContent = "Failed: " + (data.error || "unknown error");
+        statusEl.className = "save-status err";
+        return;
+      }
+      statusEl.textContent =
+        `Done - ${data.windows_simulated} window(s), ${data.segments} segment(s), strategy=${data.strategy}`;
+      simMarkers = data.markers || [];
+      renderSimStats(data.stats || {}, data.final_state || {});
+      document.getElementById("sim-log-view").innerHTML = "";
+      appendSimLogLines(data.log_lines || []);
+      await loadSimChart(0); // jump to the latest data and overlay the new markers
+    } catch (e) {
+      statusEl.textContent = "Failed: network error";
+      statusEl.className = "save-status err";
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Chart data is only fetched the first time the Simulator tab is actually opened.
+  document.querySelectorAll('.tab-btn[data-tab="simulator"]').forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!simChartLoadedOnce) {
+        simChartLoadedOnce = true;
+        loadSimChart(0);
+      }
+    });
+  });
+}
+
+// ============================================================
 // Init
 // ============================================================
 function initApp() {
   wireTopTabs();
+  wireSimulatorTab();
   wireConfigFields();
+  buildGaugeStatic();
+  buildUpDownGaugeStatic();
   loadConfig();
   loadInitialLogs();
   refreshBotStatus();
   refreshState();
+  updateSessionGauge();
+  refreshLiveTickGauges();
 
   setInterval(refreshBotStatus, 4000);
   setInterval(refreshState, 4000);
   setInterval(pollLogs, 2000);
+  setInterval(updateSessionGauge, 1000);
+  setInterval(refreshLiveTickGauges, 2000);
 }
 
 checkAuthAndInit();

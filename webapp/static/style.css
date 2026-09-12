@@ -1,3 +1,4 @@
+/* V1.1 */
 :root{
   --ink:#16181C;
   --panel:#1D2024;
@@ -223,6 +224,56 @@ code{
 .stat-value.pos{color:var(--up);}
 .stat-value.neg{color:var(--down);}
 
+/* ---------- Monitor: session time gauge ---------- */
+.session-time-row{ display:flex; flex-wrap:nowrap; gap:10px; margin-bottom:20px; }
+.session-panel{ flex:1 1 0; min-width:0; padding:12px 10px 14px; }
+.gauge-wrap{ display:flex; justify-content:center; margin-top:4px; }
+.gauge-svg{ width:100%; max-width:200px; height:auto; overflow:visible; }
+.gauge-track{ fill:none; stroke:var(--panel-2); stroke-width:10; stroke-linecap:round; }
+.gauge-band{ fill:none; stroke:var(--up); stroke-width:10; stroke-linecap:butt; opacity:0.85; }
+.gauge-band-red{ fill:none; stroke:var(--down); stroke-width:10; stroke-linecap:butt; opacity:0.85; }
+.gauge-tick-major{ stroke:var(--dim); stroke-width:2; }
+.gauge-tick-minor{ stroke:var(--dim-2); stroke-width:1; }
+.gauge-number{ font-family:var(--mono); font-size:11px; fill:var(--dim); text-anchor:middle; dominant-baseline:middle; }
+.gauge-needle{
+  stroke:var(--amber); stroke-width:3; stroke-linecap:round;
+  filter:drop-shadow(0 0 3px rgba(224,152,47,0.6));
+  transition:x2 .25s ease, y2 .25s ease;
+}
+.gauge-pivot{ fill:var(--amber); stroke:var(--ink); stroke-width:2; }
+.gauge-readout{ font-family:var(--mono); font-size:20px; font-weight:700; fill:var(--paper); }
+.timegauge-min{ font-family:var(--mono); font-size:13px; letter-spacing:0.04em; fill:var(--up); text-transform:uppercase; }
+.updowngauge-down{ font-family:var(--mono); font-size:13px; letter-spacing:0.04em; fill:var(--down); text-transform:uppercase; }
+.momgauge-dir{ font-family:var(--mono); font-size:13px; letter-spacing:0.04em; fill:var(--dim); text-transform:uppercase; }
+/*.gauge-readout-sub{ font-family:var(--mono); font-size:13px; letter-spacing:0.04em; fill:var(--dim); text-transform:uppercase; }*/
+
+/* ---------- Monitor: spot-lean (target vs CF Benchmarks) gauge ---------- */
+.spotlean-panel{ flex:1 1 0; min-width:0; padding:12px 10px 14px; }
+.updown-panel{ flex:1 1 0; min-width:0; padding:12px 10px 14px; }
+.momentum-panel{ flex:1 1 0; min-width:0; padding:12px 10px 14px; }
+.gauge-readout.pos{ fill:var(--up); }
+.gauge-readout.neg{ fill:var(--down); }
+.spotgauge-track-red{ fill:none; stroke:var(--down); stroke-width:10; stroke-linecap:round; opacity:0.55; }
+.spotgauge-track-green{ fill:none; stroke:var(--up); stroke-width:10; stroke-linecap:round; opacity:0.55; }
+.spotgauge-deadzone{ fill:none; stroke:var(--panel-2); stroke-width:10; stroke-linecap:butt; opacity:0.75; }
+.spotgauge-tick-major{ stroke:var(--dim); stroke-width:2; }
+.spotgauge-tick-minor{ stroke:var(--dim-2); stroke-width:1; }
+.spotgauge-tick-center{ stroke:var(--paper); stroke-width:2; }
+.spotgauge-number{ font-family:var(--mono); font-size:11px; fill:var(--dim); text-anchor:middle; dominant-baseline:middle; }
+.spotgauge-threshold-tick{ stroke:var(--paper); stroke-width:2; }
+.spotgauge-threshold-label{ font-family:var(--mono); font-size:11px; fill:var(--paper); text-anchor:middle; dominant-baseline:middle; }
+.spotgauge-needle{
+  stroke:var(--amber); stroke-width:3; stroke-linecap:round;
+  filter:drop-shadow(0 0 3px rgba(224,152,47,0.6));
+  transition:x2 .25s ease, y2 .25s ease, stroke .2s ease;
+}
+.spotgauge-needle.signal-up{ stroke:var(--up); filter:drop-shadow(0 0 4px rgba(79,174,114,0.6)); }
+.spotgauge-needle.signal-down{ stroke:var(--down); filter:drop-shadow(0 0 4px rgba(219,91,82,0.6)); }
+.spotgauge-target{ font-family:var(--mono); font-size:13px; font-weight:700; fill:var(--paper); }
+.spotgauge-gap.pos{ fill:var(--up); }
+.spotgauge-gap.neg{ fill:var(--down); }
+#spotgauge-gap{ font-family:var(--mono); font-size:13px; letter-spacing:0.04em; text-transform:uppercase; }
+
 /* ---------- Log panel ---------- */
 .panel{background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden;}
 .panel-header{
@@ -254,6 +305,18 @@ code{
 .log-view .line-order{color:#5B9FE0;}
 .log-view .line-window{color:var(--amber); font-weight:600;}
 .log-empty{color:var(--dim-2); font-style:italic; padding:20px 0; text-align:center;}
+
+/* ---------- Simulator tab: chart panel ---------- */
+.sim-chart-panel{margin-bottom:20px;}
+.sim-chart-nav{display:flex; gap:6px;}
+.sim-nav-btn{padding:5px 10px; font-size:11px;}
+.sim-chart-canvas{
+  display:block;
+  width:100%;
+  height:260px;
+  padding:8px 14px 14px;
+  box-sizing:border-box;
+}
 
 /* ---------- Config form ---------- */
 .config-header{
@@ -350,4 +413,6 @@ select{
   .app{padding:0 16px 40px;}
   .row2{grid-template-columns:1fr;}
   .topbar{padding:18px 0 14px;}
+  .session-time-row{flex-wrap:wrap;}
+  .session-panel, .spotlean-panel, .updown-panel, .momentum-panel{flex:1 1 calc(50% - 5px);}
 }
