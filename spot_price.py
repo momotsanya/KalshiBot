@@ -1,3 +1,4 @@
+# V1.0
 """
 Fetches the current BTC/USD spot price from public sources.
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 import atexit
 import logging
 import time
+import threading
 from typing import Optional
 
 import requests
@@ -61,6 +63,23 @@ _browser = None
 _page = None
 _last_scraped_value = None
 _last_scraped_value_since = None  # monotonic timestamp this value was first seen
+
+# --- Thread-safe cache for CF Benchmarks price ---
+# Playwright's sync API is NOT thread-safe. If we call it from the main thread
+# and the LiveTickLogger background thread simultaneously, it crashes.
+# Solution: A dedicated background thread handles ALL Playwright interactions
+# and updates a thread-safe cache. Both the main thread and the logger just
+# read from this cache.
+_cfbenchmarks_lock = threading.Lock()
+_cfbenchmarks_latest_price = None
+_cfbenchmarks_latest_time = 0.0
+_cfbenchmarks_worker_started = False
+
+# Set by force_reload_cfbenchmarks() (callable from ANY thread, e.g. the
+# LiveTickLogger thread at the start of a new session) - checked and cleared
+# only by the dedicated worker thread, which is the only thread allowed to
+# touch Playwright objects directly.
+_force_reload_requested = threading.Event()
 
 
 def _cleanup_cfbenchmarks_browser():
@@ -130,7 +149,7 @@ def _reload_cfbenchmarks_page():
         _cleanup_cfbenchmarks_browser()
         return None
 
-
+"""
 def _from_cfbenchmarks_scrape() -> Optional[float]:
     global _last_scraped_value, _last_scraped_value_since
     page = _ensure_cfbenchmarks_page()
@@ -181,7 +200,118 @@ def _from_cfbenchmarks_scrape() -> Optional[float]:
         log.debug("CF Benchmarks scrape read failed, will reinitialize the browser next call: %s", e)
         _cleanup_cfbenchmarks_browser()
         return None
+"""
 
+def _cfbenchmarks_worker():
+    """Dedicated background thread that continuously scrapes CF Benchmarks."""
+    global _cfbenchmarks_latest_price, _cfbenchmarks_latest_time
+    while True:
+        try:
+            if _force_reload_requested.is_set():
+                _force_reload_requested.clear()
+                log.info("CF Benchmarks: forced reload requested - relaunching the scraping browser.")
+                # A full relaunch (not just page.reload()) so a new session always
+                # starts from a genuinely fresh browser/page, in case the "stuck"
+                # value was caused by something below the page level (e.g. a dead
+                # websocket the JS itself never notices) that an in-place reload
+                # wouldn't necessarily clear. _ensure_cfbenchmarks_page() will
+                # lazily relaunch on the scrape call right below.
+                _cleanup_cfbenchmarks_browser()
+            price = _do_cfbenchmarks_scrape()
+            if price is not None:
+                with _cfbenchmarks_lock:
+                    _cfbenchmarks_latest_price = price
+                    _cfbenchmarks_latest_time = time.time()
+        except Exception as e:  # noqa: BLE001
+            log.debug("CF Benchmarks worker error: %s", e)
+        time.sleep(1.0)
+
+def _start_cfbenchmarks_worker():
+    global _cfbenchmarks_worker_started
+    if _cfbenchmarks_worker_started:
+        return
+    _cfbenchmarks_worker_started = True
+    t = threading.Thread(target=_cfbenchmarks_worker, daemon=True, name="CFBenchmarksWorker")
+    t.start()
+    log.info("CF Benchmarks background scraper started.")
+
+def force_reload_cfbenchmarks():
+    """
+    Requests that the CF Benchmarks scraping browser be relaunched from
+    scratch, picked up by the worker thread on its next loop iteration
+    (within ~1s). Safe to call from any thread - it only sets a flag; the
+    actual Playwright calls stay on the dedicated worker thread, since
+    Playwright's sync API isn't thread-safe.
+
+    Intended to be called once per new 15-minute window (bot.py's main loop
+    does this at the same point it logs "New window ..."), since the scraped
+    value can occasionally get stuck on one price for longer than the
+    passive staleness check's threshold catches - starting each window with
+    a guaranteed-fresh page avoids carrying a stale reading into a new
+    session's tick data or into spot_lean's own live decisions.
+    """
+    _force_reload_requested.set()
+
+def _from_cfbenchmarks_scrape() -> Optional[float]:
+    """Returns the latest cached CF Benchmarks price from the worker thread."""
+    _start_cfbenchmarks_worker()
+    with _cfbenchmarks_lock:
+        if _cfbenchmarks_latest_price is not None:
+            return _cfbenchmarks_latest_price
+    return None
+
+def _do_cfbenchmarks_scrape() -> Optional[float]:
+    """The actual scraping logic, called ONLY from the dedicated worker thread."""
+    global _last_scraped_value, _last_scraped_value_since
+    page = _ensure_cfbenchmarks_page()
+    if page is None:
+        return None
+    try:
+        text = page.locator(_CFBENCHMARKS_SELECTOR).first.inner_text(timeout=3000)
+        price = _parse_scraped_price(text)
+        if price is None:
+            # Placeholder ("-") shown briefly on page load - give it one short retry.
+            page.wait_for_timeout(500)
+            text = page.locator(_CFBENCHMARKS_SELECTOR).first.inner_text(timeout=3000)
+            price = _parse_scraped_price(text)
+            if price is None:
+                return None
+
+        now = time.monotonic()
+        if price != _last_scraped_value:
+            _last_scraped_value = price
+            _last_scraped_value_since = now
+            return price
+
+        # Same value as last time - only a problem if it's been stuck a while, since BTC
+        # can genuinely go a few seconds without moving.
+        stale_for = now - _last_scraped_value_since if _last_scraped_value_since is not None else 0
+        if stale_for <= _STALE_THRESHOLD_SEC:
+            return price
+
+        log.warning(
+            "CF Benchmarks scraped price has been stuck at $%.2f for over %.0fs - the page's live "
+            "feed may have stalled, reloading...",
+            price, stale_for,
+        )
+        page = _reload_cfbenchmarks_page()
+        if page is not None:
+            try:
+                text = page.locator(_CFBENCHMARKS_SELECTOR).first.inner_text(timeout=3000)
+                refreshed = _parse_scraped_price(text)
+                if refreshed is not None:
+                    price = refreshed
+            except Exception as e:  # noqa: BLE001
+                log.debug("Read after reload failed: %s", e)
+
+        # Reset the baseline either way, so a genuinely-unchanged price after a
+        # successful reload doesn't immediately re-trigger another reload next call.
+        _last_scraped_value, _last_scraped_value_since = price, time.monotonic()
+        return price
+    except Exception as e:  # noqa: BLE001
+        log.debug("CF Benchmarks scrape read failed, will reinitialize the browser next call: %s", e)
+        _cleanup_cfbenchmarks_browser()
+        return None
 
 def _from_coinbase() -> Optional[float]:
     resp = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=_TIMEOUT_SEC)
@@ -229,3 +359,10 @@ def get_btc_spot_price() -> tuple:
             log.debug("Spot price fetch from %s failed: %s", name, e)
     log.warning("Could not fetch BTC spot price from any source (tried: %s).", ", ".join(n for n, _ in _SOURCES))
     return None, None
+
+
+# Add to the bottom of spot_price.py
+
+def get_cf_benchmarks_price() -> Optional[float]:
+    """Fetches the BTC spot price directly from CF Benchmarks (BRTI)."""
+    return _from_cfbenchmarks_scrape()

@@ -1,3 +1,4 @@
+<!-- V1.0 -->
 # Kalshi BTC 15-Min Bot
 
 Watches Kalshi's `KXBTC15M` BTC up/down market, checks who won the last
@@ -155,6 +156,44 @@ Notes:
 - First run fetches one candlestick series per historical window (can take a while for large `--days`); results are cached to `backtest_candles_cache_<series>.json`, so re-running with different strategy/parameter grids afterward is instant. Use `--refresh-candles` to force a refetch.
 - This is the mode to trust for realistic win-rate and PnL - the flat-price mode above is best used first, for a fast broad look at which `lookback_cycles`/`threshold_pct` region looks promising before confirming with `--realistic`.
 
+## Live tick recording (`live_tick.py`)
+
+A permanent, strategy-independent background recorder. From the moment
+`bot.py` starts until it exits, it writes one JSON line per second to
+`live_tick.file` (default `./live_ticks.jsonl`) - regardless of
+`strategy.mode`, entry windows, or whether any bet is placed that cycle:
+
+```json
+{"time": "2026-08-19T14:30:45.123456+00:00", "btc_spot_cfbenchmarks": 65432.50, "kalshi_strike_usd": 65400.00, "kalshi_up_price_cents": 48, "kalshi_down_price_cents": 52}
+```
+
+- `btc_spot_cfbenchmarks` - CF Benchmarks' BRTI only (no fallback to
+  Coinbase/Kraken/Binance.US, unlike `spot_lean`'s live decisions) so every
+  row in the file comes from one consistent feed. Requires the same
+  Playwright setup as `spot_lean`; if unavailable, this field is `null`.
+- `kalshi_strike_usd` - the current window's `floor_strike`.
+- `kalshi_up_price_cents` / `kalshi_down_price_cents` - live ask prices for
+  UP/DOWN from the orderbook (falling back to the market summary quote if
+  the book is thin), same derivation the bot's own entry logic uses.
+
+Any field is `null` for a given tick if that piece of data wasn't available
+at that moment (e.g. market not listed yet) - a row is still written every
+second so gaps are easy to see rather than silently missing.
+
+Config (`config.yaml`):
+
+```yaml
+live_tick:
+  enabled: true
+  interval_sec: 1.0
+  file: "./live_ticks.jsonl"
+```
+
+The file is plain JSON Lines (one JSON object per line) and grows
+continuously across all sessions - archive or rotate it yourself if you
+want to split it up (e.g. by date). It's meant purely as raw data for
+future analysis/backtesting; it never influences trading decisions.
+
 ## Web dashboard (`webapp/`)
 
 A local browser UI for editing `config.yaml` and monitoring/starting/stopping the bot, instead of hand-editing the file and running `bot.py` from the terminal.
@@ -179,6 +218,7 @@ This is a local development server (Flask's built-in one) - fine for running on 
 - `kalshi_client.py` - signed REST client (RSA-PSS auth)
 - `strategy.py` - window timing, market lookup, UP/DOWN decision
 - `spot_price.py` - live BTC/USD spot price fetcher (Coinbase/Kraken/Binance.US), used by `spot_lean` mode
+- `live_tick.py` - permanent, strategy-independent background recorder (1 JSON line/sec to `live_ticks.jsonl`)
 - `state.py` - martingale stake persistence
 - `config.yaml` - all settings
 - `webapp/server.py` - Flask backend for the web dashboard (config edit + bot start/stop/monitor)

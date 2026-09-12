@@ -1,3 +1,4 @@
+# V1.3
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -50,6 +51,7 @@ from strategy import (
     decide_spot_lean_side,
     compute_recovery_size,
     compute_smart_hedge_count,
+    compute_take_profit_profit,
     check_momentum_filter,
     get_quote,
     label,
@@ -170,11 +172,14 @@ def setup_logging(log_file: str):
 
 
 def contracts_for_stake(stake: float, sizing_mode: str, price_cents: int) -> int:
-    if sizing_mode in ("contracts", "recovery"):
+    if sizing_mode in ("contracts", "recovery", "dalembert", "anti_martingale"):
         # "recovery" only reaches here on a fresh start / after a win (no cumulative
         # loss to chase yet), where stake is just base_size contracts - same as
         # "contracts" mode. Mid-streak recovery sizing is computed separately via
         # compute_recovery_size() and passed in as an explicit count_override instead.
+        # "dalembert" and "anti_martingale" both track their own contract count
+        # directly in current_stake (see StateStore.record_dalembert_result /
+        # record_anti_martingale_result) - no separate sizing math needed here.
         return max(1, int(round(stake)))
     if sizing_mode == "dollars":
         price_dollars = price_cents / 100.0
@@ -194,7 +199,7 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
     Per-bet win/loss counts and log lines always reflect each individual bet.
     But the sizing-state update (martingale stake / recovery cumulative_loss)
     is applied ONCE per session using the NET combined outcome when
-    strategy.spot_lean.hedge.net_session_sizing is enabled (default on) and
+    strategy.hedge.net_session_sizing is enabled (default on) and
     more than one bet was placed - otherwise a single losing bet whose hedge
     happened to win would incorrectly reset to "fresh start" even though the
     session as a whole lost money. With the toggle off, each bet updates the
@@ -215,7 +220,7 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
 
     fee_cents = cfg["sizing"].get("fee_per_contract_cents", 0)
     sizing_mode = cfg["sizing"]["mode"]
-    net_session_sizing = cfg["strategy"].get("spot_lean", {}).get("hedge", {}).get("net_session_sizing", True)
+    net_session_sizing = cfg["strategy"].get("hedge", {}).get("net_session_sizing", True)
 
     outcomes = []  # (pending, won, cost_cents, pnl_cents)
     for pending in matching:
@@ -261,6 +266,23 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                 "cumulative_loss=$0.00 (fresh start)" if store.state.cumulative_loss_cents == 0
                 else f"cumulative_loss=${store.state.cumulative_loss_cents / 100:.2f}"
             )
+        elif sizing_mode == "dalembert":
+            store.record_dalembert_result(
+                won=session_won,
+                unit=cfg["sizing"]["base_size"],
+                max_stake=cfg["sizing"]["max_stake"],
+            )
+            next_state_str = f"next_stake={store.state.current_stake}"
+        elif sizing_mode == "anti_martingale":
+            am_cfg = cfg["sizing"].get("anti_martingale", {})
+            store.record_anti_martingale_result(
+                won=session_won,
+                variant=am_cfg.get("variant", "plus"),
+                unit=am_cfg.get("unit", 1),
+                multiplier=am_cfg.get("multiplier", 2),
+                max_stake=cfg["sizing"]["max_stake"],
+            )
+            next_state_str = f"next_stake={store.state.current_stake}"
         else:
             store.record_result(
                 won=session_won,
@@ -278,6 +300,21 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                 store.record_recovery_result(
                     net_pnl_cents=pnl_cents,
                     max_cumulative_loss_cents=cfg.get("recovery", {}).get("max_cumulative_loss_cents", 2000),
+                )
+            elif sizing_mode == "dalembert":
+                store.record_dalembert_result(
+                    won=won,
+                    unit=cfg["sizing"]["base_size"],
+                    max_stake=cfg["sizing"]["max_stake"],
+                )
+            elif sizing_mode == "anti_martingale":
+                am_cfg = cfg["sizing"].get("anti_martingale", {})
+                store.record_anti_martingale_result(
+                    won=won,
+                    variant=am_cfg.get("variant", "plus"),
+                    unit=am_cfg.get("unit", 1),
+                    multiplier=am_cfg.get("multiplier", 2),
+                    max_stake=cfg["sizing"]["max_stake"],
                 )
             else:
                 store.record_result(
@@ -631,12 +668,17 @@ def _submit_order(
     filled_count = count  # dry_run: no real fill data, simulate a full fill (existing behavior)
     if not cfg["runtime"]["dry_run"]:
         try:
+
+            market = client.get_market(ticker)
+            exchange_index = market.get("exchange_index")
+
             resp = client.create_order(
                 ticker=ticker,
                 side=side,
                 count=count,
                 price_cents=price_cents,
                 client_order_id=client_order_id,
+                exchange_index=exchange_index,
             )
             order_id = resp.get("order_id")
             fill_count_raw = resp.get("fill_count")
@@ -699,14 +741,19 @@ def _session_side_totals(store: StateStore, ticker: str, fee_cents: int) -> dict
     return {"yes": tuple(totals["yes"]), "no": tuple(totals["no"])}
 
 
-def monitor_spot_lean_hedge(
+def monitor_hedge(
     client: KalshiClient, store: StateStore, cfg: dict, window: Window,
     target_price: float, initial_side: str, count: int,
 ):
     """
-    Only used by spot_lean mode, and only if strategy.spot_lean.hedge.enabled.
-    After the primary bet is placed, keeps watching the live BTC spot price
-    for the rest of this 15-min window. If it crosses back to the OPPOSITE
+    Runs after the primary bet is placed for ANY strategy.mode - hedging and
+    take-profit only care about live BTC spot vs. this window's own target
+    (floor_strike), not about which strategy chose the initial side. Only
+    active if strategy.hedge.enabled and/or strategy.take_profit.enabled.
+    Keeps watching the live BTC spot price for the rest of this 15-min
+    window and can take TWO opposite kinds of action:
+
+    HEDGE (protects against a loss): if spot crosses back to the OPPOSITE
     side of the window's target (by hedge.threshold_pct), places an opposing
     bet - up to hedge.max_hedges_per_window times (default 1). Both bets get
     scored independently against the window's actual settlement (see
@@ -722,50 +769,98 @@ def monitor_spot_lean_hedge(
         regardless of which side wins - and only fires once that guaranteed
         outcome clears hedge.min_profit_cents, waiting for a better price
         otherwise (up until the window closes).
+
+    TAKE-PROFIT (the mirror of hedge - locks in a gain): fires only when ALL
+    THREE hold at once: (1) session time is within
+    [take_profit.time_start_min, take_profit.time_end_min] minutes into the
+    window, (2) the OPPOSITE side's live price is within
+    [take_profit.min_price_cents, take_profit.max_price_cents], and (3) the
+    live spot-vs-target gap still favors the main bet's side by at least
+    take_profit.threshold_pct. When all three hold AND buying the opposite
+    side at its current price (same contract count as the main bet) would
+    lock in a guaranteed profit >= take_profit.min_profit_cents no matter
+    which side the window ultimately settles on, it does so - after which
+    monitoring stops for this window, since the outcome no longer affects
+    this session's P&L.
     """
     sl_cfg = cfg["strategy"].get("spot_lean", {})
-    hedge_cfg = sl_cfg.get("hedge", {})
-    if not hedge_cfg.get("enabled", False):
+    hedge_cfg = cfg["strategy"].get("hedge", {})
+    tp_cfg = cfg["strategy"].get("take_profit", {})
+    hedge_enabled = hedge_cfg.get("enabled", False)
+    tp_enabled = tp_cfg.get("enabled", False)
+
+    if not hedge_enabled and not tp_enabled:
         return
     if target_price is None:
-        log.debug("Hedge monitor: no target price available, skipping hedge watch for this window.")
+        log.debug("Hedge/take-profit monitor: no target price available, skipping watch for this window.")
         return
 
-    fresh_start_only = hedge_cfg.get("fresh_start_only", True)
-    if fresh_start_only and count != 1:
+    hedge_fresh_start_only = hedge_cfg.get("fresh_start_only", True)
+    if hedge_enabled and hedge_fresh_start_only and count != 1:
         log.info(
             "Hedge monitor: main order count=%s (not a fresh start) - hedging is disabled for this session "
             "per hedge.fresh_start_only (hedges only follow a single-contract, fresh-start main bet).",
             count,
         )
+        hedge_enabled = False
+
+    tp_fresh_start_only = tp_cfg.get("fresh_start_only", True)
+    if tp_enabled and tp_fresh_start_only and count != 1:
+        log.info(
+            "Take-profit monitor: main order count=%s (not a fresh start) - take-profit is disabled for this "
+            "session per take_profit.fresh_start_only.",
+            count,
+        )
+        tp_enabled = False
+
+    if not hedge_enabled and not tp_enabled:
         return
 
-    hedge_threshold = hedge_cfg.get("threshold_pct", 0.0)
-    max_hedges = hedge_cfg.get("max_hedges_per_window", 1)
     max_price = cfg["strategy"]["max_price_cents"]
     min_price = cfg["strategy"].get("min_price_cents", 1)
     poll_interval = sl_cfg.get("poll_interval_sec", cfg["runtime"]["poll_interval_sec"])
     series_ticker = cfg["market"]["series_ticker"]
     safety_margin = dt.timedelta(seconds=poll_interval)
+    fee_cents = cfg["sizing"].get("fee_per_contract_cents", 0)
 
+    # --- Hedge params ---
+    hedge_threshold = hedge_cfg.get("threshold_pct", 0.0)
+    max_hedges = hedge_cfg.get("max_hedges_per_window", 1)
     smart_sizing = hedge_cfg.get("smart_sizing", False)
     smart_min_profit = hedge_cfg.get("min_profit_cents", 1)
     smart_max_contracts = hedge_cfg.get("max_contracts", 50)
-    fee_cents = cfg["sizing"].get("fee_per_contract_cents", 0)
 
     current_side = initial_side
     hedges_placed = 0
     chasing_side = None  # the side we're currently trying to get a qualifying price for, or None
 
-    log.info(
-        "Hedge monitor ON for the rest of this window - target=$%s. If BTC crosses back over this, "
-        "will place a %s-contract opposite order (up to %s hedge(s), price %sc-%sc).",
-        f"{target_price:,.2f}", count, max_hedges, min_price, max_price,
-    )
+    # --- Take-profit params ---
+    tp_threshold_pct = tp_cfg.get("threshold_pct", 0.0)
+    tp_min_profit = tp_cfg.get("min_profit_cents", 1)
+    tp_min_price = tp_cfg.get("min_price_cents", 1)
+    tp_max_price = tp_cfg.get("max_price_cents", max_price)
+    tp_time_start = tp_cfg.get("time_start_min", 0)
+    tp_time_end = tp_cfg.get("time_end_min", 15)
 
-    while hedges_placed < max_hedges:
-        if dt.datetime.now(dt.timezone.utc) >= window.close_time - safety_margin:
-            log.info("Hedge monitor: window is closing, stopping watch for this cycle.")
+    if hedge_enabled:
+        log.info(
+            "Hedge monitor ON for the rest of this window - target=$%s. If BTC crosses back over this, "
+            "will place a %s-contract opposite order (up to %s hedge(s), price %sc-%sc).",
+            f"{target_price:,.2f}", count, max_hedges, min_price, max_price,
+        )
+    if tp_enabled:
+        log.info(
+            "Take-profit monitor ON for minute %s-%s of this window - target=$%s. If the opposite side's price "
+            "(range %sc-%sc) would lock in >= $%.2f profit while spot is still favoring %s by >= %.3f%%, will "
+            "place a %s-contract opposite order to lock it in.",
+            tp_time_start, tp_time_end, f"{target_price:,.2f}", tp_min_price, tp_max_price,
+            tp_min_profit / 100, label(initial_side), tp_threshold_pct, count,
+        )
+
+    while (hedge_enabled and hedges_placed < max_hedges) or tp_enabled:
+        now = dt.datetime.now(dt.timezone.utc)
+        if now >= window.close_time - safety_margin:
+            log.info("Hedge/take-profit monitor: window is closing, stopping watch for this cycle.")
             return
 
         # Re-checked on EVERY iteration, including while chasing a qualifying price below -
@@ -773,6 +868,62 @@ def monitor_spot_lean_hedge(
         # watching spot price entirely while waiting for the contract price to qualify,
         # so a reversal back before that happened went unnoticed.
         spot, spot_source = spot_price.get_btc_spot_price()
+
+        if tp_enabled:
+            minutes_into_window = (now - window.open_time).total_seconds() / 60.0
+            if tp_time_start <= minutes_into_window <= tp_time_end:
+                tp_side, tp_gap_pct = decide_spot_lean_side(spot, target_price, tp_threshold_pct)
+                if tp_side == initial_side:
+                    opposite_side = "no" if initial_side == "yes" else "yes"
+                    tp_market = find_market_for_window(client, series_ticker, window)
+                    if tp_market:
+                        tp_ticker = tp_market["ticker"]
+                        tp_price = None
+                        try:
+                            tp_orderbook = client.get_orderbook(tp_ticker)
+                            tp_price = price_from_orderbook(tp_orderbook, opposite_side)
+                        except KalshiAPIError:
+                            pass
+                        if tp_price is None:
+                            tp_price = current_price_cents(tp_market, opposite_side)
+
+                        if tp_price is not None and tp_min_price <= tp_price <= tp_max_price:
+                            totals = _session_side_totals(store, tp_ticker, fee_cents)
+                            main_count_now, main_cost_now = totals[initial_side]
+                            if main_count_now > 0:
+                                guaranteed_profit = compute_take_profit_profit(
+                                    count, main_cost_now, tp_price, fee_cents,
+                                )
+                                log.info(
+                                    "Take-profit check: ticker=%s minute=%.1f spot gap=%+.3f%% (need >=%.3f%%) "
+                                    "opposite=%s price=%sc (range %sc-%sc) -> locking in now would guarantee "
+                                    "$%.2f (need >=$%.2f)",
+                                    tp_ticker, minutes_into_window, tp_gap_pct, tp_threshold_pct,
+                                    label(opposite_side), tp_price, tp_min_price, tp_max_price,
+                                    guaranteed_profit / 100, tp_min_profit / 100,
+                                )
+                                if guaranteed_profit >= tp_min_profit:
+                                    log.info(
+                                        "Take-profit: PLACING TAKE-PROFIT ORDER - ticker=%s opposite=%s count=%s "
+                                        "price=%sc",
+                                        tp_ticker, label(opposite_side), count, tp_price,
+                                    )
+                                    filled = _submit_order(
+                                        client, store, cfg, window, tp_ticker, opposite_side, tp_price,
+                                        count_override=count,
+                                    )
+                                    if filled > 0:
+                                        log.info(
+                                            "Take-profit order filled - profit locked in for this session; "
+                                            "stopping hedge/take-profit monitoring for this window.",
+                                        )
+                                        return
+                                    log.info("Take-profit order did not fill - continuing to watch.")
+
+        if not hedge_enabled:
+            time.sleep(poll_interval)
+            continue
+
         side, gap_pct = decide_spot_lean_side(spot, target_price, hedge_threshold)
 
         if side is None or side == current_side:
@@ -891,6 +1042,26 @@ def run(cfg: dict):
     )
     store = StateStore(cfg["runtime"]["state_file"], base_stake=cfg["sizing"]["base_size"])
 
+    # --- LIVE TICK LOGGER (permanent, strategy-independent) ---
+    # Config-gated via live_tick.enabled (default: on). `file`/`interval_sec`
+    # fall back to the old runtime.live_tick_file / a 1s default if the new
+    # live_tick: block isn't present, so existing configs keep working.
+    lt_cfg = cfg.get("live_tick", {})
+    tick_logger = None
+    if lt_cfg.get("enabled", True):
+        from data_logger import LiveTickLogger
+        tick_logger = LiveTickLogger(
+            client=client,
+            series_ticker=cfg["market"]["series_ticker"],
+            output_file=lt_cfg.get("file", cfg["runtime"].get("live_tick_file", "live_ticks.jsonl")),
+            interval_sec=lt_cfg.get("interval_sec", 1.0),
+            new_file_per_session=lt_cfg.get("new_file_per_session", True),
+        )
+        tick_logger.start()
+    else:
+        log.info("Live tick logger disabled (live_tick.enabled: false in config).")
+    # -----------------------------------------------------------
+
     log.info("=" * 60)
     log.info("Environment : %s", env)
     log.info("Base URL    : %s", cfg["kalshi"]["base_url"])
@@ -902,190 +1073,203 @@ def run(cfg: dict):
     log.info("=" * 60)
     last_processed_window_open = None
 
-    while True:
-        now = dt.datetime.now(dt.timezone.utc)
-        window = current_window(now)
+    try:
+        while True:
+            now = dt.datetime.now(dt.timezone.utc)
+            window = current_window(now)
 
-        if window.open_time != last_processed_window_open:
-            log.info(
-                "======== New window %s -> %s ========",
-                fmt_local(window.open_time), fmt_local(window.close_time),
-            )
-
-            # Determine the previous window's result by comparing floor_strike values
-            # (see compute_settlement_from_strikes) instead of waiting for Kalshi's own
-            # settlement pipeline - this is available the instant the new window's
-            # market appears, not after the old window fully closes and settles.
-            # This single fetch serves both: scoring our pending bet (if any) and
-            # deciding this window's direction, since both concern window N-1.
-            prev = previous_window(window)
-            series_ticker = cfg["market"]["series_ticker"]
-            timeout = cfg["runtime"].get("result_wait_timeout_sec", cfg["strategy"]["entry_end_min"] * 60)
-            prev_market, prev_result = compute_settlement_from_strikes(
-                client, series_ticker, prev, window, cfg["runtime"]["poll_interval_sec"], timeout,
-            )
-            prev_ticker = prev_market.get("ticker") if prev_market else "unknown"
-
-            score_pending_bets(store, cfg, prev_ticker, prev_result)
-
-            if prev_result is None:
-                log.warning(
-                    "Could not determine previous window's result (ticker=%s) - skipping this window's bet.",
-                    prev_ticker,
+            if window.open_time != last_processed_window_open:
+                log.info(
+                    "======== New window %s -> %s ========",
+                    fmt_local(window.open_time), fmt_local(window.close_time),
                 )
-            else:
-                store.record_window_result(prev_result)
 
-                configured_mode = cfg["strategy"]["mode"]
-                price_trend_pct = None
+                # Determine the previous window's result by comparing floor_strike values
+                # (see compute_settlement_from_strikes) instead of waiting for Kalshi's own
+                # settlement pipeline - this is available the instant the new window's
+                # market appears, not after the old window fully closes and settles.
+                # This single fetch serves both: scoring our pending bet (if any) and
+                # deciding this window's direction, since both concern window N-1.
+                prev = previous_window(window)
+                series_ticker = cfg["market"]["series_ticker"]
+                timeout = cfg["runtime"].get("result_wait_timeout_sec", cfg["strategy"]["entry_end_min"] * 60)
+                prev_market, prev_result = compute_settlement_from_strikes(
+                    client, series_ticker, prev, window, cfg["runtime"]["poll_interval_sec"], timeout,
+                )
+                prev_ticker = prev_market.get("ticker") if prev_market else "unknown"
 
-                if configured_mode == "price_trend":
-                    pt_cfg = cfg["strategy"].get("price_trend", {})
-                    lookback_cycles = pt_cfg.get("lookback_cycles", 6)
-                    threshold_pct = pt_cfg.get("threshold_pct", 0.15)
+                score_pending_bets(store, cfg, prev_ticker, prev_result)
 
-                    series = get_price_series(client, series_ticker, window, lookback_cycles)
-                    series_str = " -> ".join(f"${p:,.0f}" if p is not None else "?" for _, p in series)
-                    log.info("BTC price, last %s cycles (oldest->newest): %s", lookback_cycles, series_str)
-
-                    side, price_trend_pct = decide_price_trend_side(series, threshold_pct)
-                    if side is None:
-                        if price_trend_pct is None:
-                            log.warning("Price-trend: insufficient price data - skipping this window's bet.")
-                        else:
-                            log.info(
-                                "Price-trend: change=%+.3f%% is within +/-%.3f%% threshold - no clear trend, skipping.",
-                                price_trend_pct, threshold_pct,
-                            )
-                    else:
-                        log.info(
-                            "Price-trend: change=%+.3f%% (threshold +/-%.3f%%) -> target %s",
-                            price_trend_pct, threshold_pct, label(side),
-                        )
-                    effective_mode = "price_trend"
-
-                elif configured_mode == "spot_lean":
-                    sl_cfg = cfg["strategy"].get("spot_lean", {})
-                    sl_threshold_pct = sl_cfg.get("threshold_pct", 0.0)
-
-                    current_market = find_market_for_window(client, series_ticker, window)
-                    target_price_cache = [get_strike_price(current_market)]
-                    if target_price_cache[0] is None:
-                        log.info("Spot-lean: target price (floor_strike) not available yet - will keep checking.")
-                    else:
-                        log.info("Spot-lean: this window's target price (floor_strike) = $%s", f"{target_price_cache[0]:,.2f}")
-
-                    def _spot_lean_side_provider(_cache=target_price_cache, _threshold=sl_threshold_pct):
-                        if _cache[0] is None:
-                            m = find_market_for_window(client, series_ticker, window)
-                            _cache[0] = get_strike_price(m) if m else None
-                            if _cache[0] is None:
-                                return None
-                            log.info("Spot-lean: target price (floor_strike) now available = $%s", f"{_cache[0]:,.2f}")
-
-                        spot, spot_source = spot_price.get_btc_spot_price()
-                        chosen, gap_pct = decide_spot_lean_side(spot, _cache[0], _threshold)
-                        if spot is not None and gap_pct is not None:
-                            log.info(
-                                "Spot-lean: BTC spot from %s=$%s target=$%s gap=%+.3f%% -> %s",
-                                spot_source, f"{spot:,.2f}", f"{_cache[0]:,.2f}", gap_pct,
-                                label(chosen) if chosen else "no signal (too close to call)",
-                            )
-                        return chosen
-
-                    side = _spot_lean_side_provider  # a callable - wait_and_place_bet resolves it live, every poll
-                    effective_mode = "spot_lean"
-
-                elif configured_mode == "adaptive":
-                    if store.state.last_bet_won is None:
-                        effective_mode = cfg["strategy"].get("adaptive_default_mode", "momentum")
-                        log.info("Adaptive mode: no prior bet yet -> starting with %s", effective_mode)
-                    else:
-                        effective_mode = "momentum" if store.state.last_bet_won else "reversal"
-                        log.info(
-                            "Adaptive mode: last bet %s -> using %s this window",
-                            "WIN" if store.state.last_bet_won else "LOSS", effective_mode,
-                        )
-                    side = decide_side(prev_result, effective_mode)
-
-                else:
-                    effective_mode = configured_mode
-                    side = decide_side(prev_result, effective_mode)
-
-                minutes_into_window = (now - window.open_time).total_seconds() / 60.0
-                entry_start = cfg["strategy"]["entry_start_min"]
-                entry_end = cfg["strategy"]["entry_end_min"]
-                side_display = "DYNAMIC (spot-lean)" if callable(side) else label(side)
-
-                if side is None:
-                    # price_trend with no clear trend, or insufficient price data - already logged above.
-                    pass
-                else:
-                    log.info(
-                        "Strategy mode=%s -> target this window: %s | stake=%s (%s) | "
-                        "entry window: minute %.1f-%.1f",
-                        configured_mode if configured_mode != "adaptive" else f"adaptive->{effective_mode}",
-                        side_display, store.state.current_stake,
-                        cfg["sizing"]["mode"], entry_start, entry_end,
+                if prev_result is None:
+                    log.warning(
+                        "Could not determine previous window's result (ticker=%s) - skipping this window's bet.",
+                        prev_ticker,
                     )
+                else:
+                    store.record_window_result(prev_result)
 
-                    chop_cfg = cfg["strategy"].get("chop_filter", {})
-                    recent_history = ", ".join(label(r) for r in store.state.recent_results[-8:])
-                    log.info("Recent window history (oldest->newest): %s", recent_history or "(none yet)")
+                    configured_mode = cfg["strategy"]["mode"]
+                    price_trend_pct = None
 
-                    skip_for_chop = False
-                    if chop_cfg.get("enabled"):
-                        lookback = chop_cfg.get("lookback", 4)
-                        max_alt = chop_cfg.get("max_alternations", 3)
-                        window_slice = store.state.recent_results[-lookback:]
-                        alternations = count_alternations(window_slice)
-                        log.info(
-                            "Chop filter: last %s results -> %s alternation(s) (skip threshold: %s)",
-                            len(window_slice), alternations, max_alt,
-                        )
-                        if len(window_slice) >= lookback and alternations >= max_alt:
-                            skip_for_chop = True
-                            store.state.skipped_chop += 1
-                            store.save()
-                            log.warning(
-                                "CHOP DETECTED - market whipsawing (%s alternations in last %s windows). "
-                                "Skipping this bet, target=%s. (total chop-skips: %s)",
-                                alternations, len(window_slice), side_display, store.state.skipped_chop,
-                            )
+                    if configured_mode == "price_trend":
+                        pt_cfg = cfg["strategy"].get("price_trend", {})
+                        lookback_cycles = pt_cfg.get("lookback_cycles", 6)
+                        threshold_pct = pt_cfg.get("threshold_pct", 0.15)
 
-                    if skip_for_chop:
-                        pass  # already logged; do not enter the entry-window wait/bet flow
-                    else:
-                        last_heartbeat = 0.0
-                        while minutes_into_window < entry_start:
-                            now = dt.datetime.now(dt.timezone.utc)
-                            minutes_into_window = (now - window.open_time).total_seconds() / 60.0
-                            if time.monotonic() - last_heartbeat > 30:
+                        series = get_price_series(client, series_ticker, window, lookback_cycles)
+                        series_str = " -> ".join(f"${p:,.0f}" if p is not None else "?" for _, p in series)
+                        log.info("BTC price, last %s cycles (oldest->newest): %s", lookback_cycles, series_str)
+
+                        side, price_trend_pct = decide_price_trend_side(series, threshold_pct)
+                        if side is None:
+                            if price_trend_pct is None:
+                                log.warning("Price-trend: insufficient price data - skipping this window's bet.")
+                            else:
                                 log.info(
-                                    "Waiting for entry window to open in %s (target=%s)...",
-                                    fmt_secs(entry_start * 60 - minutes_into_window * 60), side_display,
+                                    "Price-trend: change=%+.3f%% is within +/-%.3f%% threshold - no clear trend, skipping.",
+                                    price_trend_pct, threshold_pct,
                                 )
-                                last_heartbeat = time.monotonic()
-                            time.sleep(cfg["runtime"]["poll_interval_sec"])
-
-                        if minutes_into_window <= entry_end:
-                            pending_before = list(store.state.pending_bets)
-                            wait_and_place_bet(client, store, cfg, window, side)
-                            if configured_mode == "spot_lean":
-                                newly_placed = [b for b in store.state.pending_bets if b not in pending_before]
-                                if newly_placed:
-                                    placed = newly_placed[-1]
-                                    monitor_spot_lean_hedge(
-                                        client, store, cfg, window,
-                                        target_price_cache[0], placed["side"], int(round(placed["stake"])),
-                                    )
                         else:
-                            log.warning("Missed entry window (now at minute %.1f) - skipping this bet.", minutes_into_window)
+                            log.info(
+                                "Price-trend: change=%+.3f%% (threshold +/-%.3f%%) -> target %s",
+                                price_trend_pct, threshold_pct, label(side),
+                            )
+                        effective_mode = "price_trend"
 
-            last_processed_window_open = window.open_time
+                    elif configured_mode == "spot_lean":
+                        sl_cfg = cfg["strategy"].get("spot_lean", {})
+                        sl_threshold_pct = sl_cfg.get("threshold_pct", 0.0)
 
-        time.sleep(cfg["runtime"]["poll_interval_sec"])
+                        current_market = find_market_for_window(client, series_ticker, window)
+                        target_price_cache = [get_strike_price(current_market)]
+                        if target_price_cache[0] is None:
+                            log.info("Spot-lean: target price (floor_strike) not available yet - will keep checking.")
+                        else:
+                            log.info("Spot-lean: this window's target price (floor_strike) = $%s", f"{target_price_cache[0]:,.2f}")
 
+                        def _spot_lean_side_provider(_cache=target_price_cache, _threshold=sl_threshold_pct):
+                            if _cache[0] is None:
+                                m = find_market_for_window(client, series_ticker, window)
+                                _cache[0] = get_strike_price(m) if m else None
+                                if _cache[0] is None:
+                                    return None
+                                log.info("Spot-lean: target price (floor_strike) now available = $%s", f"{_cache[0]:,.2f}")
+
+                            spot, spot_source = spot_price.get_btc_spot_price()
+                            chosen, gap_pct = decide_spot_lean_side(spot, _cache[0], _threshold)
+                            if spot is not None and gap_pct is not None:
+                                log.info(
+                                    "Spot-lean: BTC spot from %s=$%s target=$%s gap=%+.3f%% -> %s",
+                                    spot_source, f"{spot:,.2f}", f"{_cache[0]:,.2f}", gap_pct,
+                                    label(chosen) if chosen else "no signal (too close to call)",
+                                )
+                            return chosen
+
+                        side = _spot_lean_side_provider  # a callable - wait_and_place_bet resolves it live, every poll
+                        effective_mode = "spot_lean"
+
+                    elif configured_mode == "adaptive":
+                        if store.state.last_bet_won is None:
+                            effective_mode = cfg["strategy"].get("adaptive_default_mode", "momentum")
+                            log.info("Adaptive mode: no prior bet yet -> starting with %s", effective_mode)
+                        else:
+                            effective_mode = "momentum" if store.state.last_bet_won else "reversal"
+                            log.info(
+                                "Adaptive mode: last bet %s -> using %s this window",
+                                "WIN" if store.state.last_bet_won else "LOSS", effective_mode,
+                            )
+                        side = decide_side(prev_result, effective_mode)
+
+                    else:
+                        effective_mode = configured_mode
+                        side = decide_side(prev_result, effective_mode)
+
+                    minutes_into_window = (now - window.open_time).total_seconds() / 60.0
+                    entry_start = cfg["strategy"]["entry_start_min"]
+                    entry_end = cfg["strategy"]["entry_end_min"]
+                    side_display = "DYNAMIC (spot-lean)" if callable(side) else label(side)
+
+                    if side is None:
+                        # price_trend with no clear trend, or insufficient price data - already logged above.
+                        pass
+                    else:
+                        log.info(
+                            "Strategy mode=%s -> target this window: %s | stake=%s (%s) | "
+                            "entry window: minute %.1f-%.1f",
+                            configured_mode if configured_mode != "adaptive" else f"adaptive->{effective_mode}",
+                            side_display, store.state.current_stake,
+                            cfg["sizing"]["mode"], entry_start, entry_end,
+                        )
+
+                        chop_cfg = cfg["strategy"].get("chop_filter", {})
+                        recent_history = ", ".join(label(r) for r in store.state.recent_results[-8:])
+                        log.info("Recent window history (oldest->newest): %s", recent_history or "(none yet)")
+
+                        skip_for_chop = False
+                        if chop_cfg.get("enabled"):
+                            lookback = chop_cfg.get("lookback", 4)
+                            max_alt = chop_cfg.get("max_alternations", 3)
+                            window_slice = store.state.recent_results[-lookback:]
+                            alternations = count_alternations(window_slice)
+                            log.info(
+                                "Chop filter: last %s results -> %s alternation(s) (skip threshold: %s)",
+                                len(window_slice), alternations, max_alt,
+                            )
+                            if len(window_slice) >= lookback and alternations >= max_alt:
+                                skip_for_chop = True
+                                store.state.skipped_chop += 1
+                                store.save()
+                                log.warning(
+                                    "CHOP DETECTED - market whipsawing (%s alternations in last %s windows). "
+                                    "Skipping this bet, target=%s. (total chop-skips: %s)",
+                                    alternations, len(window_slice), side_display, store.state.skipped_chop,
+                                )
+
+                        if skip_for_chop:
+                            pass  # already logged; do not enter the entry-window wait/bet flow
+                        else:
+                            last_heartbeat = 0.0
+                            while minutes_into_window < entry_start:
+                                now = dt.datetime.now(dt.timezone.utc)
+                                minutes_into_window = (now - window.open_time).total_seconds() / 60.0
+                                if time.monotonic() - last_heartbeat > 30:
+                                    log.info(
+                                        "Waiting for entry window to open in %s (target=%s)...",
+                                        fmt_secs(entry_start * 60 - minutes_into_window * 60), side_display,
+                                    )
+                                    last_heartbeat = time.monotonic()
+                                time.sleep(cfg["runtime"]["poll_interval_sec"])
+
+                            if minutes_into_window <= entry_end:
+                                pending_before = list(store.state.pending_bets)
+                                wait_and_place_bet(client, store, cfg, window, side)
+                                newly_placed = [b for b in store.state.pending_bets if b not in pending_before]
+                                hedge_or_tp_enabled = (
+                                    cfg["strategy"].get("hedge", {}).get("enabled", False)
+                                    or cfg["strategy"].get("take_profit", {}).get("enabled", False)
+                                )
+                                if newly_placed and hedge_or_tp_enabled:
+                                    placed = newly_placed[-1]
+                                    if configured_mode == "spot_lean":
+                                        hedge_target_price = target_price_cache[0]
+                                    else:
+                                        hedge_market = find_market_for_window(client, series_ticker, window)
+                                        hedge_target_price = get_strike_price(hedge_market) if hedge_market else None
+                                    monitor_hedge(
+                                        client, store, cfg, window,
+                                        hedge_target_price, placed["side"], int(round(placed["stake"])),
+                                    )
+                            else:
+                                log.warning("Missed entry window (now at minute %.1f) - skipping this bet.", minutes_into_window)
+
+                last_processed_window_open = window.open_time
+
+            time.sleep(cfg["runtime"]["poll_interval_sec"])
+    except KeyboardInterrupt:
+        if tick_logger is not None:
+            log.info("Stopping live tick logger...")
+            tick_logger.stop()
+        raise  # Re-raise so main() can catch it and exit cleanly
 
 def main():
     parser = argparse.ArgumentParser(description="Kalshi BTC 15-min martingale bot")

@@ -1,3 +1,4 @@
+# V1.1
 """
 Persists martingale stake + the pending bet so the bot can resume correctly
 after a restart (crucial: martingale sizing depends on the outcome of the
@@ -36,7 +37,7 @@ class BotState:
     skipped_chop: int = 0
     last_bet_won: Optional[bool] = None  # for adaptive mode: outcome of our most recent settled bet
     cumulative_loss_cents: int = 0  # for sizing.mode="recovery": total unrecovered loss (incl. fees) in the current losing streak
-    recovery_attempts: int = 0  # consecutive windows where no qualifying recovery price/size was found
+    recovery_attempts: int = 0  # this naturally counts "losses in the row" at the session level a losing session increments it, a fully-recovered session or a cap-triggered reset zeroes it
     max_drawdown_cents: int = 0  # peak (cumulative_loss_cents + cost of the bet just placed) ever reached
 
     def to_json(self) -> str:
@@ -98,6 +99,7 @@ class StateStore:
             self.state.max_drawdown_cents = candidate_cents
         self.save()
 
+
     def record_recovery_result(self, net_pnl_cents: int, max_cumulative_loss_cents: int):
         """
         Update cumulative_loss_cents for sizing.mode="recovery", based on the
@@ -118,21 +120,70 @@ class StateStore:
         on any win" behavior in that case. The difference only shows up when
         a hedge changes the session's net result away from what the recovery
         math originally targeted (which is exactly the bug this fixes).
+
+        recovery_attempts counts consecutive LOSING sessions in the current
+        streak (i.e. sessions that didn't fully clear cumulative_loss_cents) -
+        reset to 0 on a fresh start, whether that's from fully recovering or
+        from hitting the safety cap below.
         """
         self.state.cumulative_loss_cents = max(0, self.state.cumulative_loss_cents - net_pnl_cents)
         fully_recovered = self.state.cumulative_loss_cents == 0
         self.state.last_bet_won = fully_recovered
         if fully_recovered:
             self.state.recovery_attempts = 0
-        elif self.state.cumulative_loss_cents > max_cumulative_loss_cents:
-            log.warning(
-                "Recovery mode: cumulative loss $%.2f exceeded safety cap $%.2f - giving up on recovering "
-                "this streak and resetting to a fresh start instead of chasing it further.",
-                self.state.cumulative_loss_cents / 100, max_cumulative_loss_cents / 100,
-            )
-            self.state.cumulative_loss_cents = 0
-            self.state.recovery_attempts = 0
-            self.state.last_bet_won = True
+        else:
+            self.state.recovery_attempts += 1
+            if self.state.cumulative_loss_cents > max_cumulative_loss_cents:
+                log.warning(
+                    "Recovery mode: cumulative loss $%.2f exceeded safety cap $%.2f - giving up on recovering "
+                    "this streak and resetting to a fresh start instead of chasing it further.",
+                    self.state.cumulative_loss_cents / 100, max_cumulative_loss_cents / 100,
+                )
+                self.state.cumulative_loss_cents = 0
+                self.state.recovery_attempts = 0
+                self.state.last_bet_won = True
+        self.save()
+
+    def record_dalembert_result(self, won: bool, unit: float, max_stake: float):
+        """
+        D'Alembert sizing: a gentler progression than martingale's
+        multiplicative doubling - increases the stake by one `unit` after a
+        loss, decreases it by one `unit` after a win. Floors at one `unit`
+        (never drops below a fresh-start stake, so it can't go to zero or
+        negative) and is capped at max_stake as a safety ceiling, same as
+        record_result()'s martingale cap.
+        """
+        self.state.last_bet_won = won
+        if won:
+            self.state.current_stake = max(unit, self.state.current_stake - unit)
+        else:
+            self.state.current_stake = min(self.state.current_stake + unit, max_stake)
+        self.save()
+
+    def record_anti_martingale_result(
+        self, won: bool, variant: str, unit: float, multiplier: float, max_stake: float,
+    ):
+        """
+        Anti-martingale ("reverse martingale") sizing: the mirror image of
+        classic martingale - grows the stake while WINNING and snaps
+        straight back to a fresh start (self.base_stake) after ANY loss,
+        instead of growing after losses and resetting after wins. There's
+        no loss-streak compounding here, so unlike record_result() there's
+        no max_steps/circuit-breaker to track - a loss always just resets.
+
+        variant="plus": stake increases by one fixed `unit` after each win.
+        variant="multiplier" (or anything else): stake is multiplied by
+          `multiplier` after each win.
+        Either way, the growing stake is capped at max_stake.
+        """
+        self.state.last_bet_won = won
+        if won:
+            if variant == "plus":
+                self.state.current_stake = min(self.state.current_stake + unit, max_stake)
+            else:
+                self.state.current_stake = min(self.state.current_stake * multiplier, max_stake)
+        else:
+            self.state.current_stake = self.base_stake
         self.save()
 
     def record_result(self, won: bool, multiplier: float, max_steps: int, max_stake: float):

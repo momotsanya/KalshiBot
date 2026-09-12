@@ -1,0 +1,127 @@
+# V1.2
+# ============================================================
+# Config for tick_backtest.py
+# Replays strategies against your recorded ./data/*.jsonl tick
+# files (from data_logger.py) instead of calling the Kalshi API.
+# ============================================================
+#python tick_backtest.py --backtest-config backtest_ticks_config.yaml --export-csv results.csv --quiet
+#python tick_backtest.py --backtest-config backtest_ticks_config.yaml --export-xlsx results.xlsx --quiet
+
+# Folder containing your live_ticks_YYYYMMDD_HHMM.jsonl files.
+data_dir: "./data"
+file_pattern: "*.jsonl"
+
+# Anything NOT overridden in the grid below (auth, market, runtime.dry_run,
+# etc.) is pulled from your real config.yaml - point this at it.
+base_config: "./config.yaml"
+
+# Which strategies to run. Each gets its own results table. Hedging now
+# works underneath every one of these (see grid.common.strategy.hedge
+# below) - it only depends on live BTC spot vs. this window's own
+# floor_strike, not on which strategy picked the side, so it's no longer
+# spot_lean-only.
+strategies_to_test:
+  - spot_lean
+  - momentum
+  - reversal
+  - adaptive
+  - price_trend
+
+# ------------------------------------------------------------
+# DISPLAY: independent of what's swept below. Override either
+# on the command line (--label-fields, --sort-by, --sort-order)
+# without editing this file.
+# ------------------------------------------------------------
+
+# Which swept params to show in the Params column, and in what order.
+# Dotted names, "strategy." prefix optional either way. Omit/comment out
+# to show every swept param (can get long with a wide grid).
+label_fields:
+  #- spot_lean.threshold_pct
+  #- sizing.mode
+  #- sizing.anti_martingale.variant
+  #- hedge.enabled
+  #- hedge.smart_sizing
+  #- hedge.max_hedges_per_window
+  #- take_profit.enabled
+  #- take_profit.threshold_pct
+
+# What to sort the results table by. One of: pnl, bets, wins, losses,
+# skipped, win_rate, avg_price, max_loss_streak, max_drawdown, hedges,
+# take_profits.
+sort_by: max_drawdown
+sort_order: asc   # asc | desc
+
+# ------------------------------------------------------------
+# GRID: every list here is swept combinatorially (cartesian
+# product). "common" params apply to every strategy tested;
+# strategy-specific blocks apply only to that strategy's runs.
+# hedge/take_profit live under "common" now (moved out of the old
+# spot_lean-only block) so they sweep for EVERY strategy in
+# strategies_to_test above, not just spot_lean.
+# Keep the grids small at first - this is combinatorial, and with
+# 5 strategies x a hedge grid this size it can get big fast - raise
+# --max-combos or trim the hedge grid further if a run gets capped.
+# ------------------------------------------------------------
+grid:
+  common:
+    strategy:
+      entry_start_min: [7]
+      entry_end_min: [15]
+      min_price_cents: [50]
+      max_price_cents: [75]
+      momentum_filter:
+        enabled: [false]
+        lookback_sec: [40]
+      # --- Hedge: fires an opposing bet if BTC crosses back against the
+      # main bet's side before the window closes. Applies underneath
+      # whichever strategy is being tested (see strategies_to_test above).
+      hedge:
+        enabled: [true]
+        threshold_pct: [0.02, 0.025, 0.03, 0.035, 0.04]
+        fresh_start_only: [true]
+        smart_sizing: [true]
+        max_hedges_per_window: [0, 3, 5, 7, 10]
+        min_profit_cents: [1]
+        max_contracts: [50000]
+      # take_profit is the mirror of hedge - locks in a gain instead of
+      # protecting against a loss. Left off (single-value list, so it
+      # doesn't multiply the grid) by default - flip `enabled` to a swept
+      # list to actually test it, e.g.:
+      #   enabled: [false, true]
+      #   threshold_pct: [0.03, 0.05, 0.08]
+      # NOTE: the hedge grid above is already 5 x 5 = 25 combos per
+      # strategy - adding swept take_profit dimensions multiplies that
+      # further, so lower --max-combos or trim the hedge grid first.
+      take_profit:
+        enabled: [false]
+        threshold_pct: [0.01]
+        time_start_min: [7]
+        time_end_min: [14]
+        min_price_cents: [1]
+        max_price_cents: [75]
+        min_profit_cents: [20]
+        fresh_start_only: [true]
+    sizing:
+      # "contracts" | "dollars" | "recovery" | "dalembert" | "anti_martingale"
+      # Sweeping both dalembert and anti_martingale here doubles every combo
+      # count below (and the anti_martingale.variant sweep doubles it again,
+      # even though variant only matters when mode=anti_martingale - grid
+      # combos are the full cartesian product regardless of which values are
+      # actually used by a given mode) - raise --max-combos if runs get capped.
+      mode: ["dalembert", "anti_martingale"]
+      anti_martingale:
+        variant: ["plus", "multiplier"]
+        unit: [1]
+        multiplier: [2]
+
+  spot_lean:
+    strategy:
+      spot_lean:
+        threshold_pct: [0.01, 0.015]
+
+  price_trend:
+    strategy:
+      price_trend:
+        lookback_cycles: [2, 4, 6, 8]
+        threshold_pct: [0.05, 0.1, 0.15, 0.2]

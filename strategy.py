@@ -1,3 +1,4 @@
+# V1.0
 """
 Time-window math, market discovery, and UP/DOWN decision logic.
 """
@@ -279,6 +280,30 @@ def compute_smart_hedge_count(
 
     guaranteed_profit_cents = (this_side_count + count_needed) * 100 - total_cost_before_this_hedge - count_needed * (price_cents + fee_per_contract_cents)
     return count_needed, guaranteed_profit_cents
+
+
+def compute_take_profit_profit(
+    count: int, this_side_cost_cents: int, opposite_price_cents: int, fee_per_contract_cents: int,
+) -> int:
+    """
+    The mirror image of compute_smart_hedge_count: instead of solving for the
+    hedge count needed to cover a loss, this checks a FIXED count (the main
+    bet's own count) and returns the guaranteed profit (cents) if that many
+    contracts are bought on the OPPOSITE side right now, at opposite_price_cents.
+
+    Since both sides then hold the identical count, the payout is exactly
+    count * 100 regardless of which side the window ultimately settles on -
+    this is what makes it a real profit LOCK rather than another strategy bet:
+    once placed, the outcome no longer matters to this session's P&L.
+
+        guaranteed_profit = count*100 - (this_side_cost_cents + count*(opposite_price_cents + fee))
+
+    The caller should only act on this if the result is >= their configured
+    min_profit_cents - a low (or negative) result just means the market
+    hasn't moved far enough in our favor yet for locking in to be worthwhile.
+    """
+    opposite_cost_cents = count * (opposite_price_cents + fee_per_contract_cents)
+    return count * 100 - (this_side_cost_cents + opposite_cost_cents)
 
 
 SIDE_LABEL = {"yes": "UP", "no": "DOWN"}

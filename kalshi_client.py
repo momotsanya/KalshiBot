@@ -1,3 +1,4 @@
+# V1.0
 """
 Minimal Kalshi trade-api v2 client.
 
@@ -203,6 +204,7 @@ class KalshiClient:
         client_order_id: str,
         time_in_force: str = "immediate_or_cancel",
         self_trade_prevention_type: str = "taker_at_cross",
+        exchange_index: Optional[int] = None,
     ) -> dict:
         """
         Places an order via Kalshi's V2 endpoint (POST /portfolio/events/orders).
@@ -236,11 +238,15 @@ class KalshiClient:
             "ticker": ticker,
             "client_order_id": client_order_id,
             "side": book_side,
-            "count": f"{count:.2f}",
+            "count": str(int(count)),
             "price": f"{yes_price_dollars:.4f}",
             "time_in_force": time_in_force,
             "self_trade_prevention_type": self_trade_prevention_type,
         }
+
+        if exchange_index is not None:
+            body["exchange_index"] = exchange_index
+
         return self._request("POST", "/portfolio/events/orders", json_body=body)
 
     def get_order(self, order_id: str) -> dict:
