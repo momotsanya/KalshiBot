@@ -1,4 +1,4 @@
-# V1.2
+# V1.3
 """
 Persists martingale stake + the pending bet so the bot can resume correctly
 after a restart (crucial: martingale sizing depends on the outcome of the
@@ -40,6 +40,7 @@ class BotState:
     recovery_attempts: int = 0  # this naturally counts "losses in the row" at the session level a losing session increments it, a fully-recovered session or a cap-triggered reset zeroes it
     max_drawdown_cents: int = 0  # peak (cumulative_loss_cents + cost of the bet just placed) ever reached
     dalembert_reverse_pnl_cents: int = 0  # for sizing.mode="dalembert_reverse": running net PnL since the last profit-lock/loss-floor reset (or fresh start)
+    consecutive_wins: int = 0  # for sizing.mode="anti_martingale": current win streak length, reset on any loss (mirrors consecutive_losses for classic martingale)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -217,29 +218,44 @@ class StateStore:
         self.save()
 
     def record_anti_martingale_result(
-        self, won: bool, variant: str, unit: float, multiplier: float, max_stake: float,
+        self, won: bool, variant: str, unit: float, multiplier: float, max_stake: float, max_steps: int,
     ):
         """
         Anti-martingale ("reverse martingale") sizing: the mirror image of
         classic martingale - grows the stake while WINNING and snaps
         straight back to a fresh start (self.base_stake) after ANY loss,
-        instead of growing after losses and resetting after wins. There's
-        no loss-streak compounding here, so unlike record_result() there's
-        no max_steps/circuit-breaker to track - a loss always just resets.
+        instead of growing after losses and resetting after wins.
 
         variant="plus": stake increases by one fixed `unit` after each win.
         variant="multiplier" (or anything else): stake is multiplied by
           `multiplier` after each win.
         Either way, the growing stake is capped at max_stake.
+
+        max_steps is the win-streak mirror of record_result()'s own
+        max_steps circuit breaker: consecutive_wins counts the CURRENT win
+        streak (reset to 0 on any loss, same as consecutive_losses resets
+        to 0 on any win over there). Once a streak exceeds max_steps, this
+        win resets straight back to a fresh start instead of growing the
+        stake further - a safety cap so a hot streak can't ride the stake
+        up indefinitely even before max_stake itself would kick in.
         """
         self.state.last_bet_won = won
         if won:
-            if variant == "plus":
+            self.state.consecutive_wins += 1
+            if self.state.consecutive_wins > max_steps:
+                log.warning(
+                    "Max anti-martingale steps (%s) exceeded - resetting to base stake instead of growing further.",
+                    max_steps,
+                )
+                self.state.current_stake = self.base_stake
+                self.state.consecutive_wins = 0
+            elif variant == "plus":
                 self.state.current_stake = min(self.state.current_stake + unit, max_stake)
             else:
                 self.state.current_stake = min(self.state.current_stake * multiplier, max_stake)
         else:
             self.state.current_stake = self.base_stake
+            self.state.consecutive_wins = 0
         self.save()
 
     def record_result(self, won: bool, multiplier: float, max_steps: int, max_stake: float):

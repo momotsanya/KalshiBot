@@ -1,4 +1,4 @@
-# V1.4
+# V1.5
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -293,6 +293,7 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                 unit=am_cfg.get("unit", 1),
                 multiplier=am_cfg.get("multiplier", 2),
                 max_stake=cfg["sizing"]["max_stake"],
+                max_steps=cfg["sizing"].get("max_anti_martingale_steps", 10),
             )
             next_state_str = f"next_stake={store.state.current_stake}"
         else:
@@ -337,6 +338,7 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                     unit=am_cfg.get("unit", 1),
                     multiplier=am_cfg.get("multiplier", 2),
                     max_stake=cfg["sizing"]["max_stake"],
+                    max_steps=cfg["sizing"].get("max_anti_martingale_steps", 10),
                 )
             else:
                 store.record_result(
