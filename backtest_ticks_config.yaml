@@ -1,4 +1,4 @@
-# V1.3
+# V1.4
 # ============================================================
 # Config for tick_backtest.py
 # Replays strategies against your recorded ./data/*.jsonl tick
@@ -40,6 +40,7 @@ label_fields:
   #- spot_lean.threshold_pct
   #- sizing.mode
   #- sizing.anti_martingale.variant
+  #- sizing.max_anti_martingale_steps
   #- hedge.enabled
   #- hedge.smart_sizing
   #- hedge.max_hedges_per_window
@@ -104,12 +105,14 @@ grid:
         fresh_start_only: [true]
     sizing:
       # "contracts" | "dollars" | "recovery" | "dalembert" | "dalembert_reverse" | "anti_martingale"
-      # Sweeping both dalembert and anti_martingale here doubles every combo
-      # count below (and the anti_martingale.variant sweep doubles it again,
-      # even though variant only matters when mode=anti_martingale - grid
-      # combos are the full cartesian product regardless of which values are
-      # actually used by a given mode) - raise --max-combos if runs get capped.
+      # Sweeping mode/variant/max_anti_martingale_steps here multiplies every
+      # combo count below (2 modes x 2 variants x 2 step-caps = 8x - and the
+      # anti_martingale-only fields still apply to every dalembert combo too,
+      # even though they're unused there, since grid combos are the full
+      # cartesian product regardless of which values a given mode actually
+      # reads) - raise --max-combos if runs get capped.
       mode: ["dalembert", "anti_martingale"]
+      max_anti_martingale_steps: [5, 10]
       anti_martingale:
         variant: ["plus", "multiplier"]
         unit: [1]
