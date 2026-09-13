@@ -1,5 +1,5 @@
 <!-- V1.0 -->
-# STILL UNDER CONSTRUCTION!!!
+# !!!UNDER CONSTRUCTION!!!
 # Kalshi BTC 15-Min Bot
 
 Watches Kalshi's `KXBTC15M` BTC up/down market, checks who won the last
