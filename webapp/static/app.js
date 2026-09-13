@@ -1,4 +1,4 @@
-// V1.3
+// V1.4
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -716,6 +716,8 @@ function wireConfigFields() {
   bindField("sizing_max_martingale_steps", ["sizing", "max_martingale_steps"], "number");
   bindField("sizing_max_stake", ["sizing", "max_stake"], "number");
   bindField("sizing_dalembert_unit", ["sizing", "dalembert_unit"], "number");
+  bindField("dr_profit_lock_cents", ["sizing", "dalembert_reverse", "profit_lock_cents"], "number");
+  bindField("dr_loss_floor_cents", ["sizing", "dalembert_reverse", "loss_floor_cents"], "number");
   bindField("am_unit", ["sizing", "anti_martingale", "unit"], "number");
   bindField("am_multiplier", ["sizing", "anti_martingale", "multiplier"], "number");
 
@@ -815,10 +817,12 @@ function renderModeState() {
 function renderSizingVisibility() {
   const mode = getPath(cfg, ["sizing", "mode"]);
   const isRecovery = mode === "recovery";
-  const isDalembert = mode === "dalembert";
+  const isDalembert = mode === "dalembert" || mode === "dalembert_reverse";
+  const isDalembertReverse = mode === "dalembert_reverse";
   const isAntiMartingale = mode === "anti_martingale";
   document.getElementById("recoveryFields").classList.toggle("dimmed", !isRecovery);
   document.getElementById("dalembertFields").classList.toggle("dimmed", !isDalembert);
+  document.getElementById("dalembertReverseFields").classList.toggle("dimmed", !isDalembertReverse);
   document.getElementById("antiMartingaleFields").classList.toggle("dimmed", !isAntiMartingale);
   document.getElementById("martingaleFields").style.opacity = (isRecovery || isDalembert || isAntiMartingale) ? "0.4" : "1";
 }
