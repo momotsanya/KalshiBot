@@ -1,4 +1,4 @@
-// V1.4
+// V1.5
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -720,6 +720,7 @@ function wireConfigFields() {
   bindField("dr_loss_floor_cents", ["sizing", "dalembert_reverse", "loss_floor_cents"], "number");
   bindField("am_unit", ["sizing", "anti_martingale", "unit"], "number");
   bindField("am_multiplier", ["sizing", "anti_martingale", "multiplier"], "number");
+  bindField("sizing_max_anti_martingale_steps", ["sizing", "max_anti_martingale_steps"], "number");
 
   bindField("recovery_min_profit_cents", ["recovery", "min_profit_cents"], "number");
   bindField("recovery_max_contracts", ["recovery", "max_contracts"], "number");
