@@ -1,4 +1,5 @@
 <!-- V1.0 -->
+# STILL UNDER CONSTRUCTION!!!
 # Kalshi BTC 15-Min Bot
 
 Watches Kalshi's `KXBTC15M` BTC up/down market, checks who won the last
@@ -23,7 +24,7 @@ you store it) and fill in `config.yaml`:
 kalshi:
   key_id: "your-key-id"
   private_key_path: "./kalshi_private_key.pem"
-  base_url: "https://demo-api.kalshi.co/trade-api/v2"   # start here
+  base_url: https://external-api.kalshi.com/trade-api/v2   # start here
 ```
 
 ## 2. Test in demo mode first
