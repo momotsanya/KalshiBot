@@ -1,4 +1,4 @@
-# V1.2
+# V1.3
 # ============================================================
 # Config for tick_backtest.py
 # Replays strategies against your recorded ./data/*.jsonl tick
@@ -103,7 +103,7 @@ grid:
         min_profit_cents: [20]
         fresh_start_only: [true]
     sizing:
-      # "contracts" | "dollars" | "recovery" | "dalembert" | "anti_martingale"
+      # "contracts" | "dollars" | "recovery" | "dalembert" | "dalembert_reverse" | "anti_martingale"
       # Sweeping both dalembert and anti_martingale here doubles every combo
       # count below (and the anti_martingale.variant sweep doubles it again,
       # even though variant only matters when mode=anti_martingale - grid
@@ -114,6 +114,15 @@ grid:
         variant: ["plus", "multiplier"]
         unit: [1]
         multiplier: [2]
+      # dalembert_reverse shares dalembert_unit (swept separately isn't
+      # needed, since sizing_dalembert_unit already applies to it). Left
+      # off the default mode sweep above to avoid a 3rd multiplier on top
+      # of the two already in play - add it in like so to test it:
+      #   mode: ["dalembert", "dalembert_reverse", "anti_martingale"]
+      # and optionally sweep its own thresholds:
+      #   dalembert_reverse:
+      #     profit_lock_cents: [0, 200, 500]
+      #     loss_floor_cents: [0, 200, 500]
 
   spot_lean:
     strategy:

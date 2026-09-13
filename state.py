@@ -1,4 +1,4 @@
-# V1.1
+# V1.2
 """
 Persists martingale stake + the pending bet so the bot can resume correctly
 after a restart (crucial: martingale sizing depends on the outcome of the
@@ -39,6 +39,7 @@ class BotState:
     cumulative_loss_cents: int = 0  # for sizing.mode="recovery": total unrecovered loss (incl. fees) in the current losing streak
     recovery_attempts: int = 0  # this naturally counts "losses in the row" at the session level a losing session increments it, a fully-recovered session or a cap-triggered reset zeroes it
     max_drawdown_cents: int = 0  # peak (cumulative_loss_cents + cost of the bet just placed) ever reached
+    dalembert_reverse_pnl_cents: int = 0  # for sizing.mode="dalembert_reverse": running net PnL since the last profit-lock/loss-floor reset (or fresh start)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -158,6 +159,61 @@ class StateStore:
             self.state.current_stake = max(unit, self.state.current_stake - unit)
         else:
             self.state.current_stake = min(self.state.current_stake + unit, max_stake)
+        self.save()
+
+    def record_dalembert_reverse_result(
+        self, won: bool, net_pnl_cents: int, unit: float, max_stake: float,
+        profit_lock_cents: int, loss_floor_cents: int,
+    ):
+        """
+        D'Alembert Reverse: the mirror image of record_dalembert_result() -
+        stake increases by one `unit` after a WIN and decreases by one
+        `unit` after a LOSS (floored at `unit`, capped at max_stake),
+        instead of the classic dalembert's "up on loss, down on win". Shares
+        the same `unit` config value (sizing.dalembert_unit) as classic
+        dalembert - only the step direction differs.
+
+        On top of the stepping, `dalembert_reverse_pnl_cents` accumulates
+        the REAL net PnL (not just win/loss) of every settled bet/session
+        since the last reset - this is what the two optional thresholds
+        below act on:
+          - profit_lock_cents: once the running counter reaches this much
+            profit, lock it in and reset to a fresh start (base_stake, and
+            the counter zeroed) instead of letting the stake climb
+            indefinitely on a hot streak.
+          - loss_floor_cents: once the running counter drops to this much
+            loss (given here as a positive magnitude; compared against the
+            counter going <= -loss_floor_cents), cut the losing run short
+            and reset instead of grinding the stake down by `unit` forever.
+        Either threshold set to 0 (or negative) disables that check - the
+        stake then just steps up/down indefinitely between `unit` and
+        max_stake, same as classic dalembert with no circuit breaker.
+        """
+        self.state.last_bet_won = won
+        self.state.dalembert_reverse_pnl_cents += net_pnl_cents
+
+        if won:
+            self.state.current_stake = min(self.state.current_stake + unit, max_stake)
+        else:
+            self.state.current_stake = max(unit, self.state.current_stake - unit)
+
+        if profit_lock_cents > 0 and self.state.dalembert_reverse_pnl_cents >= profit_lock_cents:
+            log.info(
+                "D'Alembert Reverse: profit-lock threshold reached ($%.2f >= $%.2f) - "
+                "locking in the gain and resetting to a fresh start.",
+                self.state.dalembert_reverse_pnl_cents / 100, profit_lock_cents / 100,
+            )
+            self.state.current_stake = self.base_stake
+            self.state.dalembert_reverse_pnl_cents = 0
+        elif loss_floor_cents > 0 and self.state.dalembert_reverse_pnl_cents <= -loss_floor_cents:
+            log.warning(
+                "D'Alembert Reverse: loss-floor threshold reached (-$%.2f <= -$%.2f) - "
+                "cutting the losing run short and resetting to a fresh start.",
+                abs(self.state.dalembert_reverse_pnl_cents) / 100, loss_floor_cents / 100,
+            )
+            self.state.current_stake = self.base_stake
+            self.state.dalembert_reverse_pnl_cents = 0
+
         self.save()
 
     def record_anti_martingale_result(
