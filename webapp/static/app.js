@@ -1,4 +1,4 @@
-// V1.6
+// V1.7
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -713,6 +713,7 @@ function wireConfigFields() {
   bindField("sizing_base_size", ["sizing", "base_size"], "number");
   bindField("sizing_fee_per_contract_cents", ["sizing", "fee_per_contract_cents"], "number");
   bindField("sizing_martingale_multiplier", ["sizing", "martingale_multiplier"], "number");
+  bindField("sizing_martingale_unit", ["sizing", "martingale_unit"], "number");
   bindField("sizing_max_martingale_steps", ["sizing", "max_martingale_steps"], "number");
   bindField("sizing_max_stake", ["sizing", "max_stake"], "number");
   bindField("sizing_dalembert_unit", ["sizing", "dalembert_unit"], "number");
@@ -772,6 +773,14 @@ function wireConfigFields() {
     });
   });
 
+  document.querySelectorAll("#martingaleVariantSeg button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setPath(cfg, ["sizing", "martingale_variant"], btn.dataset.val);
+      renderMartingaleVariantSeg();
+      onConfigFieldChanged();
+    });
+  });
+
   document.querySelectorAll("#amVariantSeg button").forEach((btn) => {
     btn.addEventListener("click", () => {
       setPath(cfg, ["sizing", "anti_martingale", "variant"], btn.dataset.val);
@@ -800,6 +809,11 @@ function wireConfigFields() {
 
 function renderEnvSeg() {
   document.querySelectorAll("#envSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === currentEnv));
+}
+
+function renderMartingaleVariantSeg() {
+  const variant = getPath(cfg, ["sizing", "martingale_variant"]) || "multiplier";
+  document.querySelectorAll("#martingaleVariantSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === variant));
 }
 
 function renderAmVariantSeg() {
@@ -861,6 +875,7 @@ function renderConfigDerived() {
   const baseUrl = getPath(cfg, ["kalshi", "base_url"]) || "";
   currentEnv = baseUrl.includes("demo") ? "demo" : "production";
   renderEnvSeg();
+  renderMartingaleVariantSeg();
   renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
@@ -870,6 +885,7 @@ function renderConfigDerived() {
 }
 
 function onConfigFieldChanged() {
+  renderMartingaleVariantSeg();
   renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
