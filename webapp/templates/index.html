@@ -1,4 +1,4 @@
-<!-- V1.6 -->
+<!-- V1.7 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -324,19 +324,33 @@
           </div>
         </div>
         <div id="martingaleFields">
+          <div class="field">
+            <label>Variant</label>
+            <div class="seg" id="martingaleVariantSeg">
+              <button type="button" data-val="multiplier">x2 per loss</button>
+              <button type="button" data-val="plus">+1 per loss</button>
+            </div>
+            <div class="help">Classic martingale grows the stake after each loss. "x2 per loss" multiplies by Martingale x (exponential); "+1 per loss" instead adds Unit contracts each time (gentler, linear) - the same idea anti_martingale's variant offers for win streaks, applied here to losses. Either way resets straight to base size on a win.</div>
+          </div>
           <div class="field row2">
             <div>
               <label>Martingale x</label>
               <input type="number" id="sizing_martingale_multiplier" step="0.1" min="1">
             </div>
             <div>
+              <label>Unit (+1 mode)</label>
+              <input type="number" id="sizing_martingale_unit" step="1" min="1">
+            </div>
+          </div>
+          <div class="field row2">
+            <div>
               <label>Max steps</label>
               <input type="number" id="sizing_max_martingale_steps" step="1" min="1">
             </div>
-          </div>
-          <div class="field">
-            <label>Max stake</label>
-            <input type="number" id="sizing_max_stake" step="1" min="1">
+            <div>
+              <label>Max stake</label>
+              <input type="number" id="sizing_max_stake" step="1" min="1">
+            </div>
           </div>
         </div>
         <div class="subpanel" id="dalembertFields">
