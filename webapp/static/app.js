@@ -1,4 +1,4 @@
-// V1.5
+// V1.6
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -746,6 +746,8 @@ function wireConfigFields() {
 
   bindField("sl_threshold_pct", ["strategy", "spot_lean", "threshold_pct"], "number");
   bindField("sl_poll_interval_sec", ["strategy", "spot_lean", "poll_interval_sec"], "number");
+
+  bindField("lf_threshold_pct", ["strategy", "late_fade", "threshold_pct"], "number");
 
   bindField("hedge_enabled", ["strategy", "hedge", "enabled"], "toggle");
   bindField("hedge_threshold_pct", ["strategy", "hedge", "threshold_pct"], "number");
