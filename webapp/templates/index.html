@@ -1,4 +1,4 @@
-<!-- V1.5 -->
+<!-- V1.6 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -582,6 +582,7 @@
       <button class="strategy-tab" data-tab="adaptive"><span class="pip"></span>ADAPTIVE</button>
       <button class="strategy-tab" data-tab="price_trend"><span class="pip"></span>PRICE_TREND</button>
       <button class="strategy-tab" data-tab="spot_lean"><span class="pip"></span>SPOT_LEAN</button>
+      <button class="strategy-tab" data-tab="late_fade"><span class="pip"></span>LATE_FADE</button>
     </div>
 
     <div class="strategy-panel" data-panel="momentum">
@@ -641,6 +642,21 @@
             <label>Spot poll interval (sec)</label>
             <input type="number" id="sl_poll_interval_sec" step="1" min="1">
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="strategy-panel" data-panel="late_fade">
+      <p class="strategy-desc">Watches the closing minutes of the window and bets on a REVERSAL back toward this window's own target - the opposite of spot_lean, which bets with the current lean. If both UP and DOWN are already too expensive right at the start of the entry window, the session is skipped entirely.</p>
+      <button type="button" class="use-btn" data-usemode="late_fade">Use this strategy</button>
+      <div class="cards" style="margin-top:16px;">
+        <div class="card">
+          <h3>Signal</h3>
+          <div class="field">
+            <label>Threshold (%)</label>
+            <input type="number" id="lf_threshold_pct" step="0.01" min="0">
+          </div>
+          <div class="help">How far live BTC spot must deviate from this window's target before a reversal is anticipated. Uses the same entry window and price range as the other strategies above (card 05).</div>
         </div>
       </div>
     </div>
