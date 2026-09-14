@@ -1,4 +1,4 @@
-# V1.6
+# V1.7
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -182,7 +182,9 @@ def contracts_for_stake(stake: float, sizing_mode: str, price_cents: int) -> int
         # "dalembert", "dalembert_reverse", and "anti_martingale" all track their own
         # contract count directly in current_stake (see StateStore.record_dalembert_result /
         # record_dalembert_reverse_result / record_anti_martingale_result) - no separate
-        # sizing math needed here.
+        # sizing math needed here. Classic martingale ("contracts") also tracks its own
+        # contract count directly in current_stake regardless of variant ("multiplier" or
+        # "plus" - see StateStore.record_result) - same story, no separate math here.
         return max(1, int(round(stake)))
     if sizing_mode == "dollars":
         price_dollars = price_cents / 100.0
@@ -224,6 +226,8 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
     fee_cents = cfg["sizing"].get("fee_per_contract_cents", 0)
     sizing_mode = cfg["sizing"]["mode"]
     net_session_sizing = cfg["strategy"].get("hedge", {}).get("net_session_sizing", True)
+    martingale_variant = cfg["sizing"].get("martingale_variant", "multiplier")
+    martingale_unit = cfg["sizing"].get("martingale_unit", 1)
 
     outcomes = []  # (pending, won, cost_cents, pnl_cents)
     for pending in matching:
@@ -304,6 +308,8 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                 multiplier=cfg["sizing"]["martingale_multiplier"],
                 max_steps=cfg["sizing"]["max_martingale_steps"],
                 max_stake=cfg["sizing"]["max_stake"],
+                variant=martingale_variant,
+                unit=martingale_unit,
             )
             next_state_str = f"next_stake={store.state.current_stake}"
     else:
@@ -348,6 +354,8 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
                     multiplier=cfg["sizing"]["martingale_multiplier"],
                     max_steps=cfg["sizing"]["max_martingale_steps"],
                     max_stake=cfg["sizing"]["max_stake"],
+                    variant=martingale_variant,
+                    unit=martingale_unit,
                 )
         if sizing_mode == "recovery":
             next_state_str = (

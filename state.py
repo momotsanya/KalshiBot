@@ -1,4 +1,4 @@
-# V1.3
+# V1.4
 """
 Persists martingale stake + the pending bet so the bot can resume correctly
 after a restart (crucial: martingale sizing depends on the outcome of the
@@ -258,9 +258,25 @@ class StateStore:
             self.state.consecutive_wins = 0
         self.save()
 
-    def record_result(self, won: bool, multiplier: float, max_steps: int, max_stake: float):
-        """Update classic martingale stake after a bet (or, with net-session sizing
-        enabled, a whole session's net outcome) resolves."""
+    def record_result(
+        self, won: bool, multiplier: float, max_steps: int, max_stake: float,
+        variant: str = "multiplier", unit: float = 1,
+    ):
+        """
+        Update classic martingale stake after a bet (or, with net-session sizing
+        enabled, a whole session's net outcome) resolves.
+
+        variant="multiplier" (default, unchanged behavior): stake is
+          multiplied by `multiplier` after each loss (classic doubling).
+        variant="plus": stake instead increases by one fixed `unit` after
+          each loss - a gentler, linear growth instead of exponential, the
+          same "+1 per step" idea sizing.mode="anti_martingale" already
+          offers for win streaks (see record_anti_martingale_result), just
+          applied to martingale's loss side instead.
+        Either way: resets straight to base_stake on any win, and
+        max_martingale_steps/max_stake still apply as the same circuit
+        breakers regardless of which variant grew the stake.
+        """
         self.state.last_bet_won = won
         if won:
             self.state.consecutive_losses = 0
@@ -269,11 +285,13 @@ class StateStore:
             self.state.consecutive_losses += 1
             if self.state.consecutive_losses > max_steps:
                 log.warning(
-                    "Max martingale steps (%s) exceeded - resetting to base stake instead of doubling further.",
+                    "Max martingale steps (%s) exceeded - resetting to base stake instead of growing further.",
                     max_steps,
                 )
                 self.state.current_stake = self.base_stake
                 self.state.consecutive_losses = 0
+            elif variant == "plus":
+                self.state.current_stake = min(self.state.current_stake + unit, max_stake)
             else:
                 self.state.current_stake = min(self.state.current_stake * multiplier, max_stake)
         self.save()
