@@ -13,6 +13,10 @@ output), producing:
     to the tick's own recorded time (see _SimLogCapture), so a replay of
     2026-08-19's data reads with 2026-08-19's timestamps.
   - A flat list of order markers (main/hedge/take_profit) for charting.
+  - A pnl_series: one point per settled window with that window's resulting
+    Total PnL and contract Count - this, not the raw recorded price ticks,
+    is what the Simulator tab's chart plots (PnL curve + win/loss Count
+    bars).
   - The resulting BotState (same shape as bot_state.json) after the replay.
 
 This deliberately does NOT reimplement any sizing/hedge/take-profit/momentum
@@ -50,7 +54,7 @@ from tick_backtest import (
 
 log = logging.getLogger("simulator")
 
-SUPPORTED_MODES = ("spot_lean", "late_fade", "momentum", "reversal", "adaptive", "price_trend")
+SUPPORTED_MODES = ("spot_lean", "momentum", "reversal", "adaptive", "price_trend")
 
 
 class _SimLogCapture(logging.Handler):
@@ -96,6 +100,7 @@ class _SimObserver:
         self.fee_cents = fee_cents
         self.dry_run = dry_run
         self.markers: list[dict] = []
+        self.pnl_points: list[dict] = []
         self.last_state: dict = {}
 
     def new_window(self, window):
@@ -138,6 +143,21 @@ class _SimObserver:
         # appears, i.e. right at this window's close - see bot.py's
         # compute_settlement_from_strikes().
         self.cap.sim_time = window.close_time
+
+    def settled(self, window, ticker, contracts, pnl_delta_cents, total_pnl_cents):
+        # One point per settled window (a whole main+hedge session counts as
+        # one point, matching the combined result the SESSION NET table - or
+        # the single WIN/LOSS table when there's no hedge - reports), driving
+        # the Simulator tab's Total-PnL curve and Count bars. `result` here
+        # is that session's own net win/loss, not each individual bet's.
+        self.pnl_points.append({
+            "time": window.close_time.isoformat(),
+            "ticker": ticker,
+            "total_pnl_cents": total_pnl_cents,
+            "pnl_delta_cents": pnl_delta_cents,
+            "contracts": contracts,
+            "result": "win" if pnl_delta_cents >= 0 else "loss",
+        })
 
     def segment_finished(self, state):
         # Called once per contiguous segment; the LAST call (chronologically
@@ -209,6 +229,7 @@ def run_simulation(
         "segments": len(segments),
         "log_lines": cap.lines,
         "markers": observer.markers,
+        "pnl_series": observer.pnl_points,
         "final_state": observer.last_state,
         "stats": {
             "bets": agg.bets,

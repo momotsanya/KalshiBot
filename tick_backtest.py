@@ -1,4 +1,4 @@
-# V1.4
+# V1.2
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -34,30 +34,10 @@ compute_smart_hedge_count, compute_take_profit_profit, check_momentum_filter,
 decide_side, decide_price_trend_side directly from strategy.py, and
 contracts_for_stake, score_pending_bets, _session_side_totals directly from
 bot.py, and StateStore/PendingBet from state.py. It does NOT reimplement any
-of that math - so sizing (including "anti_martingale" - grows the stake on
-wins, resets to base on any loss, via StateStore.record_anti_martingale_result),
-hedge sizing, take-profit locking, recovery sizing, and the momentum filter
-all behave identically to a live run. Only the "wait for the next live tick"
-polling loop is replaced with "iterate over the ticks you already recorded."
-
-OBSERVER HOOKS
---------------
-run_strategy_over_segments() and every simulate_*_segment()/_scan_*()/
-_try_place() function below accept an optional `observer` object (default
-None, meaning "no-op" - the grid-search __main__ flow below never passes
-one, so its behavior is unchanged). When provided, its methods are called
-at exactly the points a live bot.py run would log something or place an
-order:
-  - new_window(window)           - once per window, before deciding a side.
-  - order_placed(window, tick_time, ticker, side, price_cents, count, kind)
-    - kind is "main", "hedge", or "take_profit".
-  - before_score(window)         - right before a settled bet's WIN/LOSS/
-    SESSION NET tables are logged via bot.py's own score_pending_bets().
-  - segment_finished(state)      - once per contiguous segment, with the
-    BotState reached at the end of that segment.
-This is how webapp/simulator.py drives a single, non-grid replay for the
-dashboard's Simulator tab and gets back a chronological log feed + order
-markers, without this module needing to know anything about that dashboard.
+of that math - so sizing, hedge sizing, take-profit locking, recovery sizing,
+and the momentum filter behave identically to a live run. Only the "wait for
+the next live tick" polling loop is replaced with "iterate over the ticks you
+already recorded."
 
 USAGE
 -----
@@ -91,8 +71,6 @@ from strategy import (
     decide_side,
     decide_price_trend_side,
     decide_spot_lean_side,
-    decide_late_fade_side,
-    both_sides_too_expensive,
     compute_recovery_size,
     compute_smart_hedge_count,
     compute_take_profit_profit,
@@ -256,7 +234,7 @@ def momentum_history_slice(times: list, prices: list, now_dt: dt.datetime, lookb
 # Shared bet-placement gate (mirrors bot.py's price/recovery/momentum checks)
 # ---------------------------------------------------------------------------
 
-def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, store: StateStore, spot_index, observer=None):
+def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, store: StateStore, spot_index):
     price = tk.up_cents if side == "yes" else tk.down_cents
     if price is None:
         return None
@@ -295,12 +273,10 @@ def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, 
         window_close_iso=window.close_time.isoformat(), ticker=ticker,
         side=side, stake=count, price_cents=price, order_id=None,
     ))
-    if observer is not None:
-        observer.order_placed(window, tk.t, ticker, side, price, count, kind="main")
     return {"price": price, "count": count, "tick": tk, "side": side}
 
 
-def _scan_entry_fixed_side(window: WindowData, side: str, cfg: dict, store: StateStore, ticker: str, spot_index, observer=None):
+def _scan_entry_fixed_side(window: WindowData, side: str, cfg: dict, store: StateStore, ticker: str, spot_index):
     """momentum / reversal / adaptive / price_trend: side is decided once per
     window, then we scan for the first tick where it qualifies - same as
     wait_and_place_bet's price-threshold logic, replayed over recorded ticks."""
@@ -312,13 +288,13 @@ def _scan_entry_fixed_side(window: WindowData, side: str, cfg: dict, store: Stat
             continue
         if elapsed_min > entry_end:
             break
-        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index, observer=observer)
+        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index)
         if placed:
             return placed
     return None
 
 
-def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index, observer=None):
+def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index):
     """spot_lean: side is re-decided on EVERY tick from live spot vs. target,
     exactly like wait_and_place_bet's dynamic-side callable."""
     sl_cfg = cfg["strategy"]["spot_lean"]
@@ -334,52 +310,23 @@ def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: S
         side, _gap = decide_spot_lean_side(tk.spot, target, threshold_pct)
         if side is None:
             continue
-        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index, observer=observer)
+        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index)
         if placed:
             return placed
     return None
 
 
-def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index, observer=None):
-    """
-    late_fade: same tick-by-tick scan as spot_lean, but (1) decides the side
-    via decide_late_fade_side (bets a reversal back toward `target`, not the
-    current lean), and (2) applies bot.py's session-skip gate: if the very
-    first tick within the entry window already shows BOTH the up and down
-    price above max_price_cents, the whole window is skipped immediately -
-    mirrors the live bot's one-shot check right at entry_start_min.
-    """
-    lf_cfg = cfg["strategy"].get("late_fade", {})
-    threshold_pct = lf_cfg.get("threshold_pct", 0.0)
-    entry_start = cfg["strategy"]["entry_start_min"]
-    entry_end = cfg["strategy"]["entry_end_min"]
-    max_price = cfg["strategy"]["max_price_cents"]
-
-    gate_checked = False
-    for tk in window.ticks:
-        elapsed_min = (tk.t - window.open_time).total_seconds() / 60.0
-        if elapsed_min < entry_start:
-            continue
-        if elapsed_min > entry_end:
-            break
-        if not gate_checked:
-            gate_checked = True
-            if both_sides_too_expensive(tk.up_cents, tk.down_cents, max_price):
-                return None  # session-skip gate: neither side cheap enough right at entry_start
-        side, _gap = decide_late_fade_side(tk.spot, target, threshold_pct)
-        if side is None:
-            continue
-        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index, observer=observer)
-        if placed:
-            return placed
-    return None
-
-
-def _scan_hedges_and_take_profit(
-    window: WindowData, target: float, main_placed: dict, cfg: dict, store: StateStore, ticker: str, observer=None,
+def _scan_spot_lean_hedges_and_take_profit(
+    window: WindowData, target: float, main_placed: dict, cfg: dict, store: StateStore, ticker: str,
+    observer=None,
 ) -> dict:
     """
-    Replays bot.py's monitor_hedge() post-entry tick-by-tick logic exactly:
+    `observer`, if given, is notified (via .order_placed(...)) of every hedge
+    and take-profit order placed here, with the real recorded tick time - see
+    simulator.py for the concrete observer used by the dashboard's Simulator
+    tab. Purely additive: passing None (the default, used by the grid-search
+    tool in this file) leaves behavior identical to before.
+    Replays monitor_spot_lean_hedge's post-entry tick-by-tick logic exactly:
     on each recorded tick after the main bet, FIRST checks take_profit (if
     enabled) - session time window, opposite-side price range, and the
     spot-vs-target gap% still favoring the main side, all gating a guaranteed-
@@ -389,14 +336,11 @@ def _scan_hedges_and_take_profit(
     hedging doesn't matter). Otherwise falls through to the existing hedge
     crossing/sizing logic, unchanged from before.
 
-    Only needs a target price and the main bet's side/count - not which
-    strategy picked that side - so this backs momentum/reversal/adaptive/
-    price_trend the same way it already backed spot_lean.
-
     Returns {"hedges_placed": int, "take_profit_placed": bool}.
     """
-    hedge_cfg = cfg["strategy"].get("hedge", {})
-    tp_cfg = cfg["strategy"].get("take_profit", {})
+    sl_cfg = cfg["strategy"]["spot_lean"]
+    hedge_cfg = sl_cfg.get("hedge", {})
+    tp_cfg = sl_cfg.get("take_profit", {})
 
     hedge_enabled = hedge_cfg.get("enabled", False)
     tp_enabled = tp_cfg.get("enabled", False)
@@ -456,10 +400,10 @@ def _scan_hedges_and_take_profit(
                                     side=opposite_side, stake=main_placed["count"], price_cents=tp_price,
                                     order_id=None,
                                 ))
-                                if observer is not None:
+                                if observer:
                                     observer.order_placed(
                                         window, tk.t, ticker, opposite_side, tp_price,
-                                        main_placed["count"], kind="take_profit",
+                                        main_placed["count"], "take_profit",
                                     )
                                 return {"hedges_placed": hedges_placed, "take_profit_placed": True}
 
@@ -492,8 +436,8 @@ def _scan_hedges_and_take_profit(
             window_close_iso=window.close_time.isoformat(), ticker=ticker,
             side=side, stake=count, price_cents=price, order_id=None,
         ))
-        if observer is not None:
-            observer.order_placed(window, tk.t, ticker, side, price, count, kind="hedge")
+        if observer:
+            observer.order_placed(window, tk.t, ticker, side, price, count, "hedge")
         hedges_placed += 1
         current_side = side
 
@@ -535,24 +479,27 @@ def _score_and_record(stats: TickBacktestResult, store: StateStore, cfg: dict, t
                        loss_streak: int, observer=None) -> int:
     """Shared post-entry bookkeeping: settle (or drop) the pending bet(s) for
     this window's ticker and fold the outcome into `stats`. Returns the
-    updated loss_streak."""
+    updated loss_streak.
+
+    `observer`, if given, is notified via .settled(...) once per settled
+    window (whether one bet or a main+hedge session) with the resulting
+    Total PnL and contract Count - see simulator.py, which uses this to
+    drive the Simulator tab's P&L-curve/Count-bars chart. Purely additive:
+    None (the default, used by this file's own grid-search __main__) leaves
+    behavior unchanged."""
     if result is None:
         store.state.pending_bets = [b for b in store.state.pending_bets if b["ticker"] != ticker]
         stats.skipped += 1
         return loss_streak
-
-    if observer is not None:
-        # Settlement is determined the moment the NEXT window's market
-        # appears, i.e. right at this window's close - see bot.py's
-        # compute_settlement_from_strikes(). Timestamps the WIN/LOSS/
-        # SESSION NET log tables score_pending_bets() is about to emit.
-        observer.before_score(window)
 
     before_pnl = store.state.total_pnl_cents
     before_wins = store.state.total_wins
     before_losses = store.state.total_losses
     score_pending_bets(store, cfg, ticker, result)
     pnl_delta = store.state.total_pnl_cents - before_pnl
+
+    if observer is not None:
+        observer.settled(window, ticker, contracts, pnl_delta, store.state.total_pnl_cents)
 
     stats.bets += (store.state.total_wins - before_wins) + (store.state.total_losses - before_losses)
     stats.wins += store.state.total_wins - before_wins
@@ -568,27 +515,6 @@ def _score_and_record(stats: TickBacktestResult, store: StateStore, cfg: dict, t
     return loss_streak
 
 
-def _finalize_entry_with_hedges(
-    stats: TickBacktestResult, store: StateStore, cfg: dict, ticker: str,
-    window: WindowData, target: float, placed: dict, result: Optional[str], loss_streak: int, observer=None,
-) -> int:
-    """
-    Shared by every strategy's segment simulator: replays hedge/take-profit
-    against the recorded ticks after `placed`, then settles the combined
-    (main + hedges) outcome. Safe to call unconditionally - when
-    strategy.hedge/take_profit are both disabled, _scan_hedges_and_take_profit
-    is a no-op and this collapses back to a plain single-bet settlement.
-    """
-    outcome = _scan_hedges_and_take_profit(window, target, placed, cfg, store, ticker, observer=observer)
-    stats.hedges_placed += outcome["hedges_placed"]
-    if outcome["take_profit_placed"]:
-        stats.take_profits_placed += 1
-    placed_bets = [b for b in store.state.pending_bets if b["ticker"] == ticker]
-    cost = sum(b["stake"] * b["price_cents"] for b in placed_bets)
-    contracts = sum(b["stake"] for b in placed_bets)
-    return _score_and_record(stats, store, cfg, ticker, window, result, cost, contracts, loss_streak, observer=observer)
-
-
 # ---------------------------------------------------------------------------
 # Per-strategy segment simulators
 # ---------------------------------------------------------------------------
@@ -597,38 +523,32 @@ def simulate_spot_lean_segment(segment, results, spot_index, cfg, store, observe
     stats = TickBacktestResult(label="spot_lean")
     loss_streak = 0
     for i, window in enumerate(segment):
-        if observer is not None:
+        if observer:
             observer.new_window(window)
         if window.strike is None:
             stats.skipped += 1
             continue
         ticker = f"SIM_{window.open_time.isoformat()}"
-        main = _scan_spot_lean_entry(window, window.strike, cfg, store, ticker, spot_index, observer=observer)
+        main = _scan_spot_lean_entry(window, window.strike, cfg, store, ticker, spot_index)
         if main is None:
             stats.skipped += 1
             continue
-        loss_streak = _finalize_entry_with_hedges(
-            stats, store, cfg, ticker, window, window.strike, main, results[i], loss_streak, observer=observer,
+        if observer:
+            observer.order_placed(window, main["tick"].t, ticker, main["side"], main["price"], main["count"], "main")
+        outcome = _scan_spot_lean_hedges_and_take_profit(
+            window, window.strike, main, cfg, store, ticker, observer=observer,
         )
-    return stats
+        stats.hedges_placed += outcome["hedges_placed"]
+        if outcome["take_profit_placed"]:
+            stats.take_profits_placed += 1
 
-
-def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observer=None) -> TickBacktestResult:
-    stats = TickBacktestResult(label="late_fade")
-    loss_streak = 0
-    for i, window in enumerate(segment):
-        if observer is not None:
-            observer.new_window(window)
-        if window.strike is None:
-            stats.skipped += 1
-            continue
-        ticker = f"SIM_{window.open_time.isoformat()}"
-        main = _scan_late_fade_entry(window, window.strike, cfg, store, ticker, spot_index, observer=observer)
-        if main is None:
-            stats.skipped += 1
-            continue
-        loss_streak = _finalize_entry_with_hedges(
-            stats, store, cfg, ticker, window, window.strike, main, results[i], loss_streak, observer=observer,
+        placed_bets = [b for b in store.state.pending_bets if b["ticker"] == ticker]
+        cost = sum(b["stake"] * b["price_cents"] for b in placed_bets)
+        contracts = sum(b["stake"] for b in placed_bets)
+        if observer:
+            observer.before_score(window)
+        loss_streak = _score_and_record(
+            stats, store, cfg, ticker, window, results[i], cost, contracts, loss_streak, observer=observer,
         )
     return stats
 
@@ -636,22 +556,28 @@ def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observe
 def simulate_fixed_mode_segment(segment, results, spot_index, cfg, store, mode: str, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label=mode)
     loss_streak = 0
+    if observer and segment:
+        observer.new_window(segment[0])  # no prior result yet, but still shown in the replayed log
     for i in range(1, len(segment)):
         prev_result = results[i - 1]
         window = segment[i]
-        if observer is not None:
+        if observer:
             observer.new_window(window)
         if prev_result is None or window.strike is None:
             stats.skipped += 1
             continue
         side = decide_side(prev_result, mode)
         ticker = f"SIM_{window.open_time.isoformat()}"
-        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index, observer=observer)
+        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index)
         if not placed:
             stats.skipped += 1
             continue
-        loss_streak = _finalize_entry_with_hedges(
-            stats, store, cfg, ticker, window, window.strike, placed, results[i], loss_streak, observer=observer,
+        if observer:
+            observer.order_placed(window, placed["tick"].t, ticker, placed["side"], placed["price"], placed["count"], "main")
+            observer.before_score(window)
+        loss_streak = _score_and_record(
+            stats, store, cfg, ticker, window, results[i],
+            placed["price"] * placed["count"], placed["count"], loss_streak, observer=observer,
         )
     return stats
 
@@ -659,10 +585,12 @@ def simulate_fixed_mode_segment(segment, results, spot_index, cfg, store, mode: 
 def simulate_adaptive_segment(segment, results, spot_index, cfg, store, default_mode: str, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label=f"adaptive(default={default_mode})")
     loss_streak = 0
+    if observer and segment:
+        observer.new_window(segment[0])
     for i in range(1, len(segment)):
         prev_result = results[i - 1]
         window = segment[i]
-        if observer is not None:
+        if observer:
             observer.new_window(window)
         if prev_result is None or window.strike is None:
             stats.skipped += 1
@@ -675,12 +603,16 @@ def simulate_adaptive_segment(segment, results, spot_index, cfg, store, default_
         )
         side = decide_side(prev_result, mode)
         ticker = f"SIM_{window.open_time.isoformat()}"
-        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index, observer=observer)
+        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index)
         if not placed:
             stats.skipped += 1
             continue
-        loss_streak = _finalize_entry_with_hedges(
-            stats, store, cfg, ticker, window, window.strike, placed, results[i], loss_streak, observer=observer,
+        if observer:
+            observer.order_placed(window, placed["tick"].t, ticker, placed["side"], placed["price"], placed["count"], "main")
+            observer.before_score(window)
+        loss_streak = _score_and_record(
+            stats, store, cfg, ticker, window, results[i],
+            placed["price"] * placed["count"], placed["count"], loss_streak, observer=observer,
         )
     return stats
 
@@ -691,28 +623,46 @@ def simulate_price_trend_segment(segment, results, spot_index, cfg, store, obser
     threshold_pct = pt_cfg.get("threshold_pct", 0.15)
     stats = TickBacktestResult(label=f"price_trend(lookback={lookback}, threshold={threshold_pct})")
     loss_streak = 0
+    if observer:
+        for w in segment[:lookback]:
+            observer.new_window(w)
     for i in range(lookback, len(segment)):
         window_slice = segment[i - lookback: i + 1]
         series = [(None, w.strike) for w in window_slice]
         side, _pct = decide_price_trend_side(series, threshold_pct)
         window = segment[i]
-        if observer is not None:
+        if observer:
             observer.new_window(window)
         if side is None:
             stats.skipped += 1
             continue
         ticker = f"SIM_{window.open_time.isoformat()}"
-        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index, observer=observer)
+        placed = _scan_entry_fixed_side(window, side, cfg, store, ticker, spot_index)
         if not placed:
             stats.skipped += 1
             continue
-        loss_streak = _finalize_entry_with_hedges(
-            stats, store, cfg, ticker, window, window.strike, placed, results[i], loss_streak, observer=observer,
+        if observer:
+            observer.order_placed(window, placed["tick"].t, ticker, placed["side"], placed["price"], placed["count"], "main")
+            observer.before_score(window)
+        loss_streak = _score_and_record(
+            stats, store, cfg, ticker, window, results[i],
+            placed["price"] * placed["count"], placed["count"], loss_streak, observer=observer,
         )
     return stats
 
 
-def run_strategy_over_segments(strategy: str, segments: list, results_by_segment: list, spot_index, cfg: dict, observer=None) -> TickBacktestResult:
+def run_strategy_over_segments(
+    strategy: str, segments: list, results_by_segment: list, spot_index, cfg: dict, observer=None,
+) -> TickBacktestResult:
+    """
+    `observer`, if given, is notified per-window/per-order as each segment is
+    replayed (see simulator.py for the dashboard's Simulator-tab observer) and
+    is also handed each segment's final StateStore.state via
+    .segment_finished(state) right before that segment's temp state file is
+    discarded - the only place the "current" bot state exists after a run.
+    Purely additive: None (the default, used by this file's own grid-search
+    __main__) leaves the existing aggregate-stats-only behavior unchanged.
+    """
     agg = TickBacktestResult(label=strategy)
     for seg, results in zip(segments, results_by_segment):
         if len(seg) < 2:
@@ -723,8 +673,6 @@ def run_strategy_over_segments(strategy: str, segments: list, results_by_segment
             store = StateStore(state_path, base_stake=cfg["sizing"]["base_size"])
             if strategy == "spot_lean":
                 r = simulate_spot_lean_segment(seg, results, spot_index, cfg, store, observer=observer)
-            elif strategy == "late_fade":
-                r = simulate_late_fade_segment(seg, results, spot_index, cfg, store, observer=observer)
             elif strategy == "price_trend":
                 r = simulate_price_trend_segment(seg, results, spot_index, cfg, store, observer=observer)
             elif strategy == "adaptive":
@@ -734,6 +682,9 @@ def run_strategy_over_segments(strategy: str, segments: list, results_by_segment
                 r = simulate_fixed_mode_segment(seg, results, spot_index, cfg, store, strategy, observer=observer)
             else:
                 raise ValueError(f"Unknown strategy: {strategy}")
+
+            if observer:
+                observer.segment_finished(store.state)
 
             agg.bets += r.bets
             agg.wins += r.wins
@@ -752,12 +703,6 @@ def run_strategy_over_segments(strategy: str, segments: list, results_by_segment
             # sizing state at gaps, so the overall figure is the worst peak seen
             # in any single contiguous run, not a sum across segments.
             agg.max_drawdown_cents = max(agg.max_drawdown_cents, store.state.max_drawdown_cents)
-            if observer is not None:
-                # Called once per contiguous segment; the LAST call (chronologically
-                # latest segment, since `segments` is already in order) is what a
-                # caller like simulator.py should treat as "state after replaying
-                # everything recorded" - each earlier call gets overwritten.
-                observer.segment_finished(store.state)
         finally:
             try:
                 os.unlink(state_path)
