@@ -1,4 +1,4 @@
-# V1.5
+# V1.6
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -49,6 +49,8 @@ from strategy import (
     decide_price_trend_side,
     get_strike_price,
     decide_spot_lean_side,
+    decide_late_fade_side,
+    both_sides_too_expensive,
     compute_recovery_size,
     compute_smart_hedge_count,
     compute_take_profit_profit,
@@ -502,13 +504,20 @@ def wait_and_place_bet(client: KalshiClient, store: StateStore, cfg: dict, windo
     mf_price_history = []  # rolling (monotonic_ts, price) samples, trimmed to mf_lookback each poll
 
     dynamic_side = callable(side)
-    # spot_lean checks live BTC price every poll, so it gets its own (tighter,
-    # by default) interval - separate from the general poll_interval_sec used
-    # by every other strategy mode and by market/order-book polling elsewhere.
-    # The momentum filter also wants frequent sampling to build a meaningful
-    # short rolling window, so it uses the same tighter interval when active.
+    # spot_lean and late_fade both check live BTC price every poll, so they
+    # get their own (tighter, by default) interval - separate from the
+    # general poll_interval_sec used by every other strategy mode and by
+    # market/order-book polling elsewhere. Read from whichever of the two
+    # dynamic-side strategy blocks is actually configured as the mode, not
+    # always spot_lean's - otherwise late_fade would silently inherit
+    # spot_lean's poll_interval_sec instead of falling back to the runtime
+    # default. The momentum filter also wants frequent sampling to build a
+    # meaningful short rolling window, so it uses the same tighter interval
+    # when active.
+    _configured_mode = cfg["strategy"].get("mode")
+    _dynamic_cfg = cfg["strategy"].get(_configured_mode, {}) if _configured_mode in ("spot_lean", "late_fade") else {}
     poll_interval = (
-        cfg["strategy"].get("spot_lean", {}).get("poll_interval_sec", cfg["runtime"]["poll_interval_sec"])
+        _dynamic_cfg.get("poll_interval_sec", cfg["runtime"]["poll_interval_sec"])
         if (dynamic_side or mf_enabled) else cfg["runtime"]["poll_interval_sec"]
     )
     resolve_side = side if dynamic_side else (lambda: side)
@@ -650,6 +659,31 @@ def wait_and_place_bet(client: KalshiClient, store: StateStore, cfg: dict, windo
                 log.info("Order did not fill - continuing to watch for a qualifying price.")
 
         time.sleep(poll_interval)
+
+
+def _current_both_side_prices(client: KalshiClient, ticker: str, market: dict) -> tuple:
+    """
+    Returns (up_price_cents, down_price_cents) - the live ask price for each
+    side, preferring the orderbook (freshest) and falling back to the
+    market-summary quote if the book is thin/empty, same precedence
+    wait_and_place_bet uses for a single side. Either value may be None if
+    no price data is available yet. Used only by the "late_fade" strategy's
+    entry gate, which (unlike everything else in this file) needs BOTH
+    sides' prices at once rather than just the one side a strategy picked.
+    """
+    orderbook = None
+    try:
+        orderbook = client.get_orderbook(ticker)
+    except KalshiAPIError as e:
+        log.debug("Orderbook fetch failed for %s: %s", ticker, e)
+
+    prices = {}
+    for side in ("yes", "no"):
+        price = price_from_orderbook(orderbook, side) if orderbook else None
+        if price is None:
+            price = current_price_cents(market, side)
+        prices[side] = price
+    return prices["yes"], prices["no"]
 
 
 def _submit_order(
@@ -808,6 +842,14 @@ def monitor_hedge(
     this session's P&L.
     """
     sl_cfg = cfg["strategy"].get("spot_lean", {})
+    # hedge/take-profit monitoring runs "underneath" whichever strategy placed
+    # the main bet, so its own poll interval isn't tied to any one strategy's
+    # config block - but it still defaults to a dynamic-side strategy's own
+    # (tighter) interval when the ACTIVE mode is one of those, same reasoning
+    # as wait_and_place_bet's poll_interval above, rather than always
+    # spot_lean's regardless of what's actually configured.
+    _configured_mode = cfg["strategy"].get("mode")
+    _hedge_poll_cfg = cfg["strategy"].get(_configured_mode, {}) if _configured_mode in ("spot_lean", "late_fade") else sl_cfg
     hedge_cfg = cfg["strategy"].get("hedge", {})
     tp_cfg = cfg["strategy"].get("take_profit", {})
     hedge_enabled = hedge_cfg.get("enabled", False)
@@ -842,7 +884,7 @@ def monitor_hedge(
 
     max_price = cfg["strategy"]["max_price_cents"]
     min_price = cfg["strategy"].get("min_price_cents", 1)
-    poll_interval = sl_cfg.get("poll_interval_sec", cfg["runtime"]["poll_interval_sec"])
+    poll_interval = _hedge_poll_cfg.get("poll_interval_sec", cfg["runtime"]["poll_interval_sec"])
     series_ticker = cfg["market"]["series_ticker"]
     safety_margin = dt.timedelta(seconds=poll_interval)
     fee_cents = cfg["sizing"].get("fee_per_contract_cents", 0)
@@ -1192,6 +1234,38 @@ def run(cfg: dict):
                         side = _spot_lean_side_provider  # a callable - wait_and_place_bet resolves it live, every poll
                         effective_mode = "spot_lean"
 
+                    elif configured_mode == "late_fade":
+                        lf_cfg = cfg["strategy"].get("late_fade", {})
+                        lf_threshold_pct = lf_cfg.get("threshold_pct", 0.0)
+
+                        current_market = find_market_for_window(client, series_ticker, window)
+                        target_price_cache = [get_strike_price(current_market)]
+                        if target_price_cache[0] is None:
+                            log.info("Late-fade: target price (floor_strike) not available yet - will keep checking.")
+                        else:
+                            log.info("Late-fade: this window's target price (floor_strike) = $%s", f"{target_price_cache[0]:,.2f}")
+
+                        def _late_fade_side_provider(_cache=target_price_cache, _threshold=lf_threshold_pct):
+                            if _cache[0] is None:
+                                m = find_market_for_window(client, series_ticker, window)
+                                _cache[0] = get_strike_price(m) if m else None
+                                if _cache[0] is None:
+                                    return None
+                                log.info("Late-fade: target price (floor_strike) now available = $%s", f"{_cache[0]:,.2f}")
+
+                            spot, spot_source = spot_price.get_btc_spot_price()
+                            chosen, gap_pct = decide_late_fade_side(spot, _cache[0], _threshold)
+                            if spot is not None and gap_pct is not None:
+                                log.info(
+                                    "Late-fade: BTC spot from %s=$%s target=$%s gap=%+.3f%% -> %s (anticipating reversal)",
+                                    spot_source, f"{spot:,.2f}", f"{_cache[0]:,.2f}", gap_pct,
+                                    label(chosen) if chosen else "no signal (too close to call)",
+                                )
+                            return chosen
+
+                        side = _late_fade_side_provider  # a callable - wait_and_place_bet resolves it live, every poll
+                        effective_mode = "late_fade"
+
                     elif configured_mode == "adaptive":
                         if store.state.last_bet_won is None:
                             effective_mode = cfg["strategy"].get("adaptive_default_mode", "momentum")
@@ -1211,7 +1285,9 @@ def run(cfg: dict):
                     minutes_into_window = (now - window.open_time).total_seconds() / 60.0
                     entry_start = cfg["strategy"]["entry_start_min"]
                     entry_end = cfg["strategy"]["entry_end_min"]
-                    side_display = "DYNAMIC (spot-lean)" if callable(side) else label(side)
+                    side_display = (
+                        f"DYNAMIC ({configured_mode.replace('_', '-')})" if callable(side) else label(side)
+                    )
 
                     if side is None:
                         # price_trend with no clear trend, or insufficient price data - already logged above.
@@ -1264,7 +1340,43 @@ def run(cfg: dict):
                                     last_heartbeat = time.monotonic()
                                 time.sleep(cfg["runtime"]["poll_interval_sec"])
 
-                            if minutes_into_window <= entry_end:
+                            # Late-fade's one-shot session-skip gate: checked exactly once, right as
+                            # the entry window opens (not at window-open, when prices haven't had a
+                            # chance to move yet). If neither side is cheap enough for a bet even at
+                            # this first moment, no price drop is being anticipated for the rest of
+                            # the window, so the whole session is skipped outright instead of being
+                            # watched all the way to entry_end_min for something that (per this rule)
+                            # isn't expected to happen.
+                            skip_for_late_fade_gate = False
+                            if configured_mode == "late_fade":
+                                gate_market = find_market_for_window(client, series_ticker, window)
+                                if gate_market:
+                                    gate_ticker = gate_market["ticker"]
+                                    up_price, down_price = _current_both_side_prices(client, gate_ticker, gate_market)
+                                    max_price_cents = cfg["strategy"]["max_price_cents"]
+                                    log.info(
+                                        "Late-fade entry gate: minute %.1f - UP=%s DOWN=%s (skip session if BOTH > %sc)",
+                                        minutes_into_window,
+                                        f"{up_price}c" if up_price is not None else "?",
+                                        f"{down_price}c" if down_price is not None else "?",
+                                        max_price_cents,
+                                    )
+                                    if both_sides_too_expensive(up_price, down_price, max_price_cents):
+                                        skip_for_late_fade_gate = True
+                                        log.warning(
+                                            "Late-fade: both UP (%sc) and DOWN (%sc) exceed max_price_cents=%sc "
+                                            "right at entry_start_min=%s - skipping this session entirely, target=%s.",
+                                            up_price, down_price, max_price_cents, entry_start, side_display,
+                                        )
+                                else:
+                                    log.info(
+                                        "Late-fade entry gate: ticker for this window not listed yet - "
+                                        "proceeding without the gate check.",
+                                    )
+
+                            if skip_for_late_fade_gate:
+                                pass  # already logged above
+                            elif minutes_into_window <= entry_end:
                                 pending_before = list(store.state.pending_bets)
                                 wait_and_place_bet(client, store, cfg, window, side)
                                 newly_placed = [b for b in store.state.pending_bets if b not in pending_before]
@@ -1274,7 +1386,7 @@ def run(cfg: dict):
                                 )
                                 if newly_placed and hedge_or_tp_enabled:
                                     placed = newly_placed[-1]
-                                    if configured_mode == "spot_lean":
+                                    if configured_mode in ("spot_lean", "late_fade"):
                                         hedge_target_price = target_price_cache[0]
                                     else:
                                         hedge_market = find_market_for_window(client, series_ticker, window)

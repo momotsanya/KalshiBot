@@ -1,11 +1,11 @@
-<!-- V1.0 -->
+<!-- V1.1 -->
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Overview
 
-Kalshi BTC 15-Min Bot - an automated trading bot for Kalshi's KXBTC15M (BTC up/down) market that runs on 15-minute cycles. It uses configurable strategies (momentum, reversal, adaptive, price_trend, spot_lean) with martingale position sizing and loss-streak circuit breakers. The bot can run in dry-run mode for testing or place real orders with live Kalshi credentials.
+Kalshi BTC 15-Min Bot - an automated trading bot for Kalshi's KXBTC15M (BTC up/down) market that runs on 15-minute cycles. It uses configurable strategies (momentum, reversal, adaptive, price_trend, spot_lean, late_fade) with martingale position sizing and loss-streak circuit breakers. The bot can run in dry-run mode for testing or place real orders with live Kalshi credentials.
 
 ## Quick Start Commands
 
@@ -46,7 +46,7 @@ The bot runs in 15-minute cycles:
 - `Window` dataclass: `open_time` (UTC) + `close_time` (15-min apart)
 - `current_window(now)` / `previous_window()` - Window math
 - `find_market_for_window()` - Search API for the ticker matching a time window
-- `decide_side()` - Strategy-specific logic (momentum/reversal/adaptive/price_trend/spot_lean)
+- `decide_side()` - Strategy-specific logic (momentum/reversal/adaptive/price_trend/spot_lean/late_fade)
 - `get_strike_price()` - Extract Kalshi's settlement target from market metadata
 - `current_price_cents()` - Poll live UP/DOWN prices from the orderbook
 
@@ -58,13 +58,13 @@ The bot runs in 15-minute cycles:
 - `KalshiClient.cancel_order()` - Cancel open orders
 
 **`state.py`** — Martingale state persistence
-- `BotState` - Tracks `current_stake`, `consecutive_losses`, `total_wins`/`total_losses`, `pending_bets` (normally 0-1, up to 2 with spot_lean hedging), `cumulative_loss_cents` (recovery mode), `max_drawdown_cents`
+- `BotState` - Tracks `current_stake`, `consecutive_losses`, `total_wins`/`total_losses`, `pending_bets` (normally 0-1, up to 2 with spot_lean/late_fade hedging), `cumulative_loss_cents` (recovery mode), `max_drawdown_cents`
 - `StateStore` - Loads/saves state from `bot_state.json` on every cycle
 - **Restart-safe** — Bot can safely be killed and restarted; martingale state survives
 
-**`spot_price.py`** — Live BTC/USD spot price fetching (for `spot_lean` mode)
+**`spot_price.py`** — Live BTC/USD spot price fetching (for `spot_lean` and `late_fade` modes)
 - Tries in order: CF Benchmarks (Playwright scraping), Coinbase, Kraken, Binance.US
-- Used by `spot_lean` strategy to determine if live BTC price justifies a bet
+- Used by `spot_lean` to bet WITH the current live-price lean, and by `late_fade` to bet AGAINST it (anticipating a reversal)
 - Returns fallback to `None` if all sources fail
 
 **`data_logger.py`** / **`live_tick.py`** — Raw market data recording
@@ -91,7 +91,7 @@ The bot runs in 15-minute cycles:
 **Top-level sections:**
 - `kalshi` — `key_id`, `private_key_path` (RSA .pem file), `base_url` (demo vs. production)
 - `market` — `series_ticker` (normally `"KXBTC15M"`)
-- `strategy` — `mode` ("momentum" | "reversal" | "adaptive" | "price_trend" | "spot_lean"), mode-specific parameters
+- `strategy` — `mode` ("momentum" | "reversal" | "adaptive" | "price_trend" | "spot_lean" | "late_fade"), mode-specific parameters
 - `sizing` — `mode` ("contracts" | "dollars" | "recovery"), base stake, martingale multiplier, max steps
 - `recovery` — Recovery mode (only when `sizing.mode: "recovery"`), cumulative loss tracking
 - `live_tick` — Data logging, file path, per-window rotation
@@ -103,6 +103,7 @@ The bot runs in 15-minute cycles:
 - **adaptive** — Win-stay / lose-shift between momentum and reversal
 - **price_trend** — Examine multi-cycle BTC price direction; grid-searchable `lookback_cycles` + `threshold_pct`
 - **spot_lean** — Bet based on where live BTC spot price stands vs. the window's settlement target (`floor_strike`); includes hedging logic
+- **late_fade** — Mirror of spot_lean: bets on a REVERSAL back toward the window's target instead of following the current lean. Watched during `entry_start_min`-`entry_end_min` like every other mode, but with one extra rule: if both UP and DOWN are already above `max_price_cents` right at `entry_start_min`, the whole session is skipped immediately instead of polling to `entry_end_min`.
 
 **Sizing modes:**
 - **contracts** — Fixed contract count per bet
@@ -113,7 +114,7 @@ The bot runs in 15-minute cycles:
 
 ### State Persistence & Restarts
 - `bot_state.json` is loaded at startup, updated after every cycle
-- `pending_bets` is a list (normally 0-1 entries, up to 2 with spot_lean hedging) to handle multiple concurrent positions
+- `pending_bets` is a list (normally 0-1 entries, up to 2 with spot_lean/late_fade hedging) to handle multiple concurrent positions
 - Never delete `bot_state.json` mid-streak unless you mean to reset martingale stake to base
 
 ### Window Timing

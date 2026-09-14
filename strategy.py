@@ -1,4 +1,4 @@
-# V1.0
+# V1.1
 """
 Time-window math, market discovery, and UP/DOWN decision logic.
 """
@@ -234,6 +234,43 @@ def decide_spot_lean_side(spot_price: Optional[float], target_price: Optional[fl
     if gap_pct < -threshold_pct:
         return "no", gap_pct
     return None, gap_pct
+
+
+def decide_late_fade_side(spot_price: Optional[float], target_price: Optional[float], threshold_pct: float = 0.0) -> tuple:
+    """
+    The mirror image of decide_spot_lean_side: instead of betting WITH the
+    current lean, this bets on a REVERSAL back toward the window's own
+    target (floor_strike) - used by the "late_fade" strategy, which watches
+    for this signal specifically in the closing minutes of a window.
+
+      - spot > target (by more than threshold_pct) -> ('no', gap_pct)  [bet DOWN, anticipating reversion]
+      - spot < target (by more than threshold_pct) -> ('yes', gap_pct) [bet UP, anticipating reversion]
+      - within threshold_pct of target, or missing data -> (None, gap_pct_or_None)
+
+    gap_pct is returned as-is (not flipped) so callers can log/display the
+    actual spot-vs-target relationship, not the inverted bet direction.
+    """
+    lean_side, gap_pct = decide_spot_lean_side(spot_price, target_price, threshold_pct)
+    if lean_side is None:
+        return None, gap_pct
+    return ("no" if lean_side == "yes" else "yes"), gap_pct
+
+
+def both_sides_too_expensive(up_price_cents: Optional[int], down_price_cents: Optional[int], max_price_cents: int) -> bool:
+    """
+    True if BOTH the UP and DOWN ask prices are known and each exceeds
+    max_price_cents - used by the "late_fade" strategy's session-skip gate:
+    if neither side is cheap enough for a bet even at entry_start_min, no
+    price drop is being anticipated during the remaining entry window, so
+    the whole session is skipped outright instead of watched all the way to
+    entry_end_min.
+
+    Returns False (don't skip) if either price is still unknown - a missing
+    price isn't evidence that a window should be skipped.
+    """
+    if up_price_cents is None or down_price_cents is None:
+        return False
+    return up_price_cents > max_price_cents and down_price_cents > max_price_cents
 
 
 def compute_smart_hedge_count(

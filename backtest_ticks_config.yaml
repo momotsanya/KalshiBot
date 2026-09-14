@@ -1,4 +1,4 @@
-# V1.4
+# V1.5
 # ============================================================
 # Config for tick_backtest.py
 # Replays strategies against your recorded ./data/*.jsonl tick
@@ -22,6 +22,7 @@ base_config: "./config.yaml"
 # spot_lean-only.
 strategies_to_test:
   - spot_lean
+  - late_fade
   - momentum
   - reversal
   - adaptive
@@ -131,6 +132,11 @@ grid:
     strategy:
       spot_lean:
         threshold_pct: [0.01, 0.015]
+
+  late_fade:
+    strategy:
+      late_fade:
+        threshold_pct: [0.01, 0.015, 0.02]
 
   price_trend:
     strategy:

@@ -1,4 +1,4 @@
-<!-- V1.0 -->
+<!-- V1.1 -->
 # !!!UNDER CONSTRUCTION!!!
 # Kalshi BTC 15-Min Bot
 
@@ -65,13 +65,14 @@ result, and log what it *would* bet.
 
 | Key | Meaning |
 |---|---|
-| `strategy.mode` | `"momentum"` = bet same side as last window's winner. `"reversal"` = bet the opposite. `"adaptive"` = win-stay/lose-shift between the two. `"price_trend"` = bet on multi-cycle BTC price movement. `"spot_lean"` = bet on where live BTC price currently stands vs. this window's own target. |
+| `strategy.mode` | `"momentum"` = bet same side as last window's winner. `"reversal"` = bet the opposite. `"adaptive"` = win-stay/lose-shift between the two. `"price_trend"` = bet on multi-cycle BTC price movement. `"spot_lean"` = bet on where live BTC price currently stands vs. this window's own target. `"late_fade"` = bet on a REVERSAL back toward this window's own target, watched during the entry window (see below). |
+| `strategy.late_fade.threshold_pct` | How far (in %) live BTC spot must be trading away from this window's own target before `late_fade` treats it as a reversal signal - same threshold semantics as `strategy.spot_lean.threshold_pct`, just betting the opposite direction. |
 | `strategy.spot_lean.hedge.enabled` | Off by default. If on, after the initial `spot_lean` bet, the bot keeps watching live BTC price for the rest of the window; if it crosses back to the opposite side of the target, places an opposing bet of the same contract count (still capped by `max_price_cents`) - up to `max_hedges_per_window` times. |
 | `strategy.spot_lean.hedge.net_session_sizing` | On by default. When a hedge fires, a window can end with two bets (e.g. a losing main bet + a winning hedge). This makes the martingale/recovery sizing state react to the NET combined result of the whole session rather than whichever individual bet happens to be scored last - otherwise a session that lost money overall could incorrectly reset to "fresh start". Turn off to restore the naive per-bet-immediate behavior. |
 
 ### BTC spot price sources (spot_price.py)
 
-Used by `spot_lean` mode. Tried in order, falling back automatically if one fails:
+Used by `spot_lean` and `late_fade` modes. Tried in order, falling back automatically if one fails:
 
 1. **CF Benchmarks' BRTI, scraped from their public page** - reportedly the actual index Kalshi settles these markets against, so it's the most accurate source, and this way is free (no account needed). Requires:
    ```bash
@@ -89,6 +90,28 @@ Used by `spot_lean` mode. Tried in order, falling back automatically if one fail
 | `sizing.martingale_multiplier` | Multiplier applied to stake after a loss (2.0 = classic martingale). |
 | `sizing.max_martingale_steps` | After this many consecutive losses, stake resets to base instead of doubling again - **this is your bankroll circuit breaker.** |
 | `sizing.max_stake` | Absolute ceiling on any single bet, regardless of martingale math. |
+
+### Late-fade strategy (`late_fade`)
+
+The mirror image of `spot_lean`: instead of betting WITH the current lean
+(live BTC spot vs. this window's own target/`floor_strike`), `late_fade`
+bets that price REVERTS back toward the target - if spot is trading above
+target by more than `strategy.late_fade.threshold_pct`, it bets DOWN
+(anticipating a pullback); if trading below, it bets UP. It uses the same
+`entry_start_min`/`entry_end_min`/`min_price_cents`/`max_price_cents`
+fields as every other mode - no separate window or price range of its own.
+
+One extra rule sits on top of that: right at `entry_start_min`, the bot
+checks the live UP and DOWN ask prices once. If BOTH are already above
+`max_price_cents` at that moment, the whole session is skipped outright -
+the bot does not keep watching until `entry_end_min` hoping one of them
+drops, since neither being cheap enough at the very start of the window
+isn't a signal this strategy is designed to wait out. (Contrast with
+`spot_lean` and the fixed-side strategies, which keep polling for a
+qualifying price across the whole entry window.) If either price is
+missing (e.g. the market/orderbook isn't ready yet), the gate does not
+trigger - a skip requires both prices to actually be known and both too
+expensive.
 
 ## Important notes
 
@@ -218,7 +241,7 @@ This is a local development server (Flask's built-in one) - fine for running on 
 - `backtest.py` - grid-search strategy parameters against real historical data
 - `kalshi_client.py` - signed REST client (RSA-PSS auth)
 - `strategy.py` - window timing, market lookup, UP/DOWN decision
-- `spot_price.py` - live BTC/USD spot price fetcher (Coinbase/Kraken/Binance.US), used by `spot_lean` mode
+- `spot_price.py` - live BTC/USD spot price fetcher (Coinbase/Kraken/Binance.US), used by `spot_lean` and `late_fade` modes
 - `live_tick.py` - permanent, strategy-independent background recorder (1 JSON line/sec to `live_ticks.jsonl`)
 - `state.py` - martingale stake persistence
 - `config.yaml` - all settings
