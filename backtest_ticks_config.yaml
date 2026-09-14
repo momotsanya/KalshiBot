@@ -21,12 +21,12 @@ base_config: "./config.yaml"
 # floor_strike, not on which strategy picked the side, so it's no longer
 # spot_lean-only.
 strategies_to_test:
-  - spot_lean
+  #- spot_lean
   - late_fade
-  - momentum
-  - reversal
-  - adaptive
-  - price_trend
+  #- momentum
+  #- reversal
+  #- adaptive
+  #- price_trend
 
 # ------------------------------------------------------------
 # DISPLAY: independent of what's swept below. Override either
@@ -68,10 +68,10 @@ sort_order: asc   # asc | desc
 grid:
   common:
     strategy:
-      entry_start_min: [7]
+      entry_start_min: [13]
       entry_end_min: [15]
-      min_price_cents: [50]
-      max_price_cents: [75]
+      min_price_cents: [5, 10, 15, 20, 25, 30, 35, 40]
+      max_price_cents: [50]
       momentum_filter:
         enabled: [false]
         lookback_sec: [40]
@@ -79,11 +79,11 @@ grid:
       # main bet's side before the window closes. Applies underneath
       # whichever strategy is being tested (see strategies_to_test above).
       hedge:
-        enabled: [true]
-        threshold_pct: [0.02, 0.025, 0.03, 0.035, 0.04]
+        enabled: [false]
+        threshold_pct: [0.02]
         fresh_start_only: [true]
         smart_sizing: [true]
-        max_hedges_per_window: [0, 3, 5, 7, 10]
+        max_hedges_per_window: [0]
         min_profit_cents: [1]
         max_contracts: [50000]
       # take_profit is the mirror of hedge - locks in a gain instead of
@@ -112,12 +112,28 @@ grid:
       # even though they're unused there, since grid combos are the full
       # cartesian product regardless of which values a given mode actually
       # reads) - raise --max-combos if runs get capped.
-      mode: ["dalembert", "anti_martingale"]
-      max_anti_martingale_steps: [5, 10]
+      mode: ["contracts"]
+      max_anti_martingale_steps: [100]
       anti_martingale:
-        variant: ["plus", "multiplier"]
+        variant: ["plus"]
         unit: [1]
         multiplier: [2]
+      # Only used when sizing.mode is "contracts" or "dollars" (classic
+      # martingale) - controls HOW the stake grows after a loss:
+      #   "multiplier" (default) - stake is multiplied by martingale_multiplier
+      #     each loss (classic doubling - exponential growth).
+      #   "plus"                 - stake instead increases by +martingale_unit
+      #     contracts each loss (gentler, linear growth) - the same "+1 per
+      #     step" idea sizing.mode="anti_martingale" already offers for win
+      #     streaks (see anti_martingale.variant below), just applied here to
+      #     martingale's loss side instead.
+      # Either variant resets straight back to base_size on a win, and
+      # max_martingale_steps/max_stake still apply as the same circuit
+      # breakers regardless of which variant is active.
+      max_martingale_steps: [100]
+      martingale_variant: ["plus", "multiplier"]
+      martingale_unit: [1]
+      martingale_multiplier: [2]
       # dalembert_reverse shares dalembert_unit (swept separately isn't
       # needed, since sizing_dalembert_unit already applies to it). Left
       # off the default mode sweep above to avoid a 3rd multiplier on top
@@ -136,7 +152,7 @@ grid:
   late_fade:
     strategy:
       late_fade:
-        threshold_pct: [0.01, 0.015, 0.02]
+        threshold_pct: [0.0]
 
   price_trend:
     strategy:
