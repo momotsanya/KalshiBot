@@ -1,4 +1,4 @@
-# V1.2
+# V1.3
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -71,6 +71,8 @@ from strategy import (
     decide_side,
     decide_price_trend_side,
     decide_spot_lean_side,
+    decide_late_fade_side,
+    both_sides_too_expensive,
     compute_recovery_size,
     compute_smart_hedge_count,
     compute_take_profit_profit,
@@ -316,6 +318,41 @@ def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: S
     return None
 
 
+def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index):
+    """
+    late_fade: same tick-by-tick scan as spot_lean, but (1) decides the side
+    via decide_late_fade_side (bets a reversal back toward `target`, not the
+    current lean), and (2) applies bot.py's session-skip gate: if the very
+    first tick within the entry window already shows BOTH the up and down
+    price above max_price_cents, the whole window is skipped immediately -
+    mirrors the live bot's one-shot check right at entry_start_min.
+    """
+    lf_cfg = cfg["strategy"].get("late_fade", {})
+    threshold_pct = lf_cfg.get("threshold_pct", 0.0)
+    entry_start = cfg["strategy"]["entry_start_min"]
+    entry_end = cfg["strategy"]["entry_end_min"]
+    max_price = cfg["strategy"]["max_price_cents"]
+
+    gate_checked = False
+    for tk in window.ticks:
+        elapsed_min = (tk.t - window.open_time).total_seconds() / 60.0
+        if elapsed_min < entry_start:
+            continue
+        if elapsed_min > entry_end:
+            break
+        if not gate_checked:
+            gate_checked = True
+            if both_sides_too_expensive(tk.up_cents, tk.down_cents, max_price):
+                return None  # session-skip gate: neither side cheap enough right at entry_start
+        side, _gap = decide_late_fade_side(tk.spot, target, threshold_pct)
+        if side is None:
+            continue
+        placed = _try_place(tk, side, window, ticker, cfg, store, spot_index)
+        if placed:
+            return placed
+    return None
+
+
 def _scan_spot_lean_hedges_and_take_profit(
     window: WindowData, target: float, main_placed: dict, cfg: dict, store: StateStore, ticker: str,
     observer=None,
@@ -553,6 +590,43 @@ def simulate_spot_lean_segment(segment, results, spot_index, cfg, store, observe
     return stats
 
 
+def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observer=None) -> TickBacktestResult:
+    stats = TickBacktestResult(label="late_fade")
+    loss_streak = 0
+    for i, window in enumerate(segment):
+        if observer:
+            observer.new_window(window)
+        if window.strike is None:
+            stats.skipped += 1
+            continue
+        ticker = f"SIM_{window.open_time.isoformat()}"
+        main = _scan_late_fade_entry(window, window.strike, cfg, store, ticker, spot_index)
+        if main is None:
+            stats.skipped += 1
+            continue
+        if observer:
+            observer.order_placed(window, main["tick"].t, ticker, main["side"], main["price"], main["count"], "main")
+        # Hedge/take-profit only care about live spot vs. this window's own
+        # target, not which strategy chose the main side - same function
+        # spot_lean uses (see bot.py's monitor_hedge() docstring).
+        outcome = _scan_spot_lean_hedges_and_take_profit(
+            window, window.strike, main, cfg, store, ticker, observer=observer,
+        )
+        stats.hedges_placed += outcome["hedges_placed"]
+        if outcome["take_profit_placed"]:
+            stats.take_profits_placed += 1
+
+        placed_bets = [b for b in store.state.pending_bets if b["ticker"] == ticker]
+        cost = sum(b["stake"] * b["price_cents"] for b in placed_bets)
+        contracts = sum(b["stake"] for b in placed_bets)
+        if observer:
+            observer.before_score(window)
+        loss_streak = _score_and_record(
+            stats, store, cfg, ticker, window, results[i], cost, contracts, loss_streak, observer=observer,
+        )
+    return stats
+
+
 def simulate_fixed_mode_segment(segment, results, spot_index, cfg, store, mode: str, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label=mode)
     loss_streak = 0
@@ -673,6 +747,8 @@ def run_strategy_over_segments(
             store = StateStore(state_path, base_stake=cfg["sizing"]["base_size"])
             if strategy == "spot_lean":
                 r = simulate_spot_lean_segment(seg, results, spot_index, cfg, store, observer=observer)
+            elif strategy == "late_fade":
+                r = simulate_late_fade_segment(seg, results, spot_index, cfg, store, observer=observer)
             elif strategy == "price_trend":
                 r = simulate_price_trend_segment(seg, results, spot_index, cfg, store, observer=observer)
             elif strategy == "adaptive":

@@ -1,4 +1,4 @@
-# V1.1
+# V1.2
 """
 Historical bot-behavior simulator for the web dashboard's "Simulator" tab.
 
@@ -54,7 +54,7 @@ from tick_backtest import (
 
 log = logging.getLogger("simulator")
 
-SUPPORTED_MODES = ("spot_lean", "momentum", "reversal", "adaptive", "price_trend")
+SUPPORTED_MODES = ("spot_lean", "late_fade", "momentum", "reversal", "adaptive", "price_trend")
 
 
 class _SimLogCapture(logging.Handler):
