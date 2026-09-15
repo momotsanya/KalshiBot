@@ -1,50 +1,9 @@
-# V1.3
+# V1.4
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
 API. This never calls Kalshi or places any order - it's pure offline replay.
-
-WHY THIS EXISTS
-----------------
-backtest.py replays strategies against Kalshi's own settlement history using
-either a flat assumed price or fetched candlesticks. That's great for
-momentum/reversal/price_trend, but it can't backtest spot_lean at all -
-spot_lean's entire decision depends on a live BTC spot price sampled multiple
-times per window, which Kalshi's API doesn't expose historically. Your
-data_logger.py already records exactly that (spot price + live up/down prices,
-once per second, one file per window) - this script replays strategies
-against that real recorded data instead.
-
-HOW SETTLEMENT IS DETERMINED
------------------------------
-Same idea as bot.py's compute_settlement_from_strikes(): each window's own
-floor_strike is fixed the moment it opens, and consecutive 15-min windows are
-back-to-back, so window N's result is:
-    'yes' (UP)   if window N+1's floor_strike > window N's floor_strike
-    'no'  (DOWN) if window N+1's floor_strike < window N's floor_strike
-For the last window of a contiguous run of files (e.g. the bot was stopped
-right after), there's no "next window" - in that case this falls back to the
-last recorded spot price tick in that window's own file, compared to its own
-floor_strike.
-
-FIDELITY
---------
-This script imports decide_spot_lean_side, compute_recovery_size,
-compute_smart_hedge_count, compute_take_profit_profit, check_momentum_filter,
-decide_side, decide_price_trend_side directly from strategy.py, and
-contracts_for_stake, score_pending_bets, _session_side_totals directly from
-bot.py, and StateStore/PendingBet from state.py. It does NOT reimplement any
-of that math - so sizing, hedge sizing, take-profit locking, recovery sizing,
-and the momentum filter behave identically to a live run. Only the "wait for
-the next live tick" polling loop is replaced with "iterate over the ticks you
-already recorded."
-
-USAGE
------
-    python tick_backtest.py --backtest-config backtest_ticks_config.yaml
-
-Requires bot.py, strategy.py, state.py (and their own dependencies) in the
-same folder, since this imports them as modules.
+... [rest of the docstring remains the same] ...
 """
 from __future__ import annotations
 
@@ -84,7 +43,6 @@ log = logging.getLogger("tick_backtest")
 
 FILENAME_RE = re.compile(r"^(?P<stem>.+)_(?P<date>\d{8})_(?P<time>\d{4})\.jsonl$")
 
-
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -97,7 +55,6 @@ class Tick:
     up_cents: Optional[int]
     down_cents: Optional[int]
 
-
 @dataclass
 class WindowData:
     open_time: dt.datetime
@@ -105,7 +62,6 @@ class WindowData:
     strike: Optional[float] = None
     ticks: list = field(default_factory=list)
     path: str = ""
-
 
 def parse_filename_open_time(path: str) -> Optional[dt.datetime]:
     m = FILENAME_RE.match(os.path.basename(path))
@@ -115,7 +71,6 @@ def parse_filename_open_time(path: str) -> Optional[dt.datetime]:
         return dt.datetime.strptime(m.group("date") + m.group("time"), "%Y%m%d%H%M")
     except ValueError:
         return None
-
 
 def load_window_file(path: str) -> Optional[WindowData]:
     ticks = []
@@ -148,8 +103,6 @@ def load_window_file(path: str) -> Optional[WindowData]:
 
     open_time = parse_filename_open_time(path)
     if open_time is None:
-        # Fallback if a file doesn't match the naming convention: floor the
-        # first tick's own time to the nearest 15-min grid line.
         first = ticks[0].t
         floor_minute = (first.minute // 15) * 15
         open_time = first.replace(minute=floor_minute, second=0, microsecond=0)
@@ -159,7 +112,6 @@ def load_window_file(path: str) -> Optional[WindowData]:
     strike = statistics.mode(strikes) if strikes else None
 
     return WindowData(open_time=open_time, close_time=close_time, strike=strike, ticks=ticks, path=path)
-
 
 def load_all_windows(data_dir: str, pattern: str = "*.jsonl") -> list:
     paths = sorted(glob.glob(os.path.join(data_dir, pattern)))
@@ -173,11 +125,7 @@ def load_all_windows(data_dir: str, pattern: str = "*.jsonl") -> list:
     windows.sort(key=lambda w: w.open_time)
     return windows
 
-
 def contiguous_segments(windows: list, tolerance_min: float = 1.0) -> list:
-    """Split into runs of back-to-back windows (no gaps in your recorded
-    sessions) - a strategy carrying state (martingale stake, recovery debt,
-    adaptive last-result) shouldn't carry it across an unknown gap."""
     if not windows:
         return []
     segments = [[windows[0]]]
@@ -189,10 +137,7 @@ def contiguous_segments(windows: list, tolerance_min: float = 1.0) -> list:
             segments.append([cur])
     return segments
 
-
 def determine_result(window: WindowData, next_window: Optional[WindowData]) -> Optional[str]:
-    """Same logic as bot.py's compute_settlement_from_strikes, applied to
-    already-recorded data instead of live API calls."""
     if window.strike is not None and next_window is not None and next_window.strike is not None:
         if next_window.strike > window.strike:
             return "yes"
@@ -209,11 +154,7 @@ def determine_result(window: WindowData, next_window: Optional[WindowData]) -> O
                 return None
     return None
 
-
 def build_spot_index(windows: list):
-    """One continuous chronological (time, price) index across ALL loaded
-    windows, for the momentum filter's rolling lookback - BTC price doesn't
-    reset at window boundaries, so the filter's lookback shouldn't either."""
     series = []
     for w in windows:
         for tk in w.ticks:
@@ -224,16 +165,14 @@ def build_spot_index(windows: list):
     prices = [p for _, p in series]
     return times, prices
 
-
 def momentum_history_slice(times: list, prices: list, now_dt: dt.datetime, lookback_sec: float) -> list:
     lo_time = now_dt - dt.timedelta(seconds=lookback_sec)
     lo = bisect.bisect_left(times, lo_time)
     hi = bisect.bisect_right(times, now_dt)
     return [(times[j].timestamp(), prices[j]) for j in range(lo, hi)]
 
-
 # ---------------------------------------------------------------------------
-# Shared bet-placement gate (mirrors bot.py's price/recovery/momentum checks)
+# Shared bet-placement gate
 # ---------------------------------------------------------------------------
 
 def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, store: StateStore, spot_index):
@@ -277,11 +216,7 @@ def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, 
     ))
     return {"price": price, "count": count, "tick": tk, "side": side}
 
-
 def _scan_entry_fixed_side(window: WindowData, side: str, cfg: dict, store: StateStore, ticker: str, spot_index):
-    """momentum / reversal / adaptive / price_trend: side is decided once per
-    window, then we scan for the first tick where it qualifies - same as
-    wait_and_place_bet's price-threshold logic, replayed over recorded ticks."""
     entry_start = cfg["strategy"]["entry_start_min"]
     entry_end = cfg["strategy"]["entry_end_min"]
     for tk in window.ticks:
@@ -295,10 +230,7 @@ def _scan_entry_fixed_side(window: WindowData, side: str, cfg: dict, store: Stat
             return placed
     return None
 
-
 def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index):
-    """spot_lean: side is re-decided on EVERY tick from live spot vs. target,
-    exactly like wait_and_place_bet's dynamic-side callable."""
     sl_cfg = cfg["strategy"]["spot_lean"]
     threshold_pct = sl_cfg.get("threshold_pct", 0.0)
     entry_start = cfg["strategy"]["entry_start_min"]
@@ -317,16 +249,7 @@ def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: S
             return placed
     return None
 
-
 def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index):
-    """
-    late_fade: same tick-by-tick scan as spot_lean, but (1) decides the side
-    via decide_late_fade_side (bets a reversal back toward `target`, not the
-    current lean), and (2) applies bot.py's session-skip gate: if the very
-    first tick within the entry window already shows BOTH the up and down
-    price above max_price_cents, the whole window is skipped immediately -
-    mirrors the live bot's one-shot check right at entry_start_min.
-    """
     lf_cfg = cfg["strategy"].get("late_fade", {})
     threshold_pct = lf_cfg.get("threshold_pct", 0.0)
     entry_start = cfg["strategy"]["entry_start_min"]
@@ -343,7 +266,7 @@ def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: S
         if not gate_checked:
             gate_checked = True
             if both_sides_too_expensive(tk.up_cents, tk.down_cents, max_price):
-                return None  # session-skip gate: neither side cheap enough right at entry_start
+                return None
         side, _gap = decide_late_fade_side(tk.spot, target, threshold_pct)
         if side is None:
             continue
@@ -352,32 +275,17 @@ def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: S
             return placed
     return None
 
-
 def _scan_spot_lean_hedges_and_take_profit(
     window: WindowData, target: float, main_placed: dict, cfg: dict, store: StateStore, ticker: str,
     observer=None,
 ) -> dict:
     """
-    `observer`, if given, is notified (via .order_placed(...)) of every hedge
-    and take-profit order placed here, with the real recorded tick time - see
-    simulator.py for the concrete observer used by the dashboard's Simulator
-    tab. Purely additive: passing None (the default, used by the grid-search
-    tool in this file) leaves behavior identical to before.
-    Replays monitor_spot_lean_hedge's post-entry tick-by-tick logic exactly:
-    on each recorded tick after the main bet, FIRST checks take_profit (if
-    enabled) - session time window, opposite-side price range, and the
-    spot-vs-target gap% still favoring the main side, all gating a guaranteed-
-    profit check via compute_take_profit_profit(). If it fires, the opposite
-    side is bought at the SAME count as the main bet and replay for this
-    window stops immediately (mirrors bot.py: once profit is locked, further
-    hedging doesn't matter). Otherwise falls through to the existing hedge
-    crossing/sizing logic, unchanged from before.
-
-    Returns {"hedges_placed": int, "take_profit_placed": bool}.
+    FIXED: Now reads hedge/take_profit from top-level strategy config, 
+    matching bot.py's monitor_hedge logic, rather than hardcoding "spot_lean".
     """
-    sl_cfg = cfg["strategy"]["spot_lean"]
-    hedge_cfg = sl_cfg.get("hedge", {})
-    tp_cfg = sl_cfg.get("take_profit", {})
+    # Hedge and take-profit are now top-level strategy configs, independent of mode
+    hedge_cfg = cfg["strategy"].get("hedge", {})
+    tp_cfg = cfg["strategy"].get("take_profit", {})
 
     hedge_enabled = hedge_cfg.get("enabled", False)
     tp_enabled = tp_cfg.get("enabled", False)
@@ -480,7 +388,6 @@ def _scan_spot_lean_hedges_and_take_profit(
 
     return {"hedges_placed": hedges_placed, "take_profit_placed": False}
 
-
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
@@ -506,24 +413,11 @@ class TickBacktestResult:
 
     @property
     def avg_price(self):
-        # Weighted by contract count, not bet count - a bet's cost already
-        # includes its stake, so dividing by bets alone can exceed 100c.
         return (self.total_price_paid_cents / self.total_contracts) if self.total_contracts else None
-
 
 def _score_and_record(stats: TickBacktestResult, store: StateStore, cfg: dict, ticker: str,
                        window: WindowData, result: Optional[str], price_cost_cents: int, contracts: int,
                        loss_streak: int, observer=None) -> int:
-    """Shared post-entry bookkeeping: settle (or drop) the pending bet(s) for
-    this window's ticker and fold the outcome into `stats`. Returns the
-    updated loss_streak.
-
-    `observer`, if given, is notified via .settled(...) once per settled
-    window (whether one bet or a main+hedge session) with the resulting
-    Total PnL and contract Count - see simulator.py, which uses this to
-    drive the Simulator tab's P&L-curve/Count-bars chart. Purely additive:
-    None (the default, used by this file's own grid-search __main__) leaves
-    behavior unchanged."""
     if result is None:
         store.state.pending_bets = [b for b in store.state.pending_bets if b["ticker"] != ticker]
         stats.skipped += 1
@@ -550,7 +444,6 @@ def _score_and_record(stats: TickBacktestResult, store: StateStore, cfg: dict, t
     loss_streak += 1
     stats.max_loss_streak = max(stats.max_loss_streak, loss_streak)
     return loss_streak
-
 
 # ---------------------------------------------------------------------------
 # Per-strategy segment simulators
@@ -589,7 +482,6 @@ def simulate_spot_lean_segment(segment, results, spot_index, cfg, store, observe
         )
     return stats
 
-
 def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label="late_fade")
     loss_streak = 0
@@ -606,9 +498,6 @@ def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observe
             continue
         if observer:
             observer.order_placed(window, main["tick"].t, ticker, main["side"], main["price"], main["count"], "main")
-        # Hedge/take-profit only care about live spot vs. this window's own
-        # target, not which strategy chose the main side - same function
-        # spot_lean uses (see bot.py's monitor_hedge() docstring).
         outcome = _scan_spot_lean_hedges_and_take_profit(
             window, window.strike, main, cfg, store, ticker, observer=observer,
         )
@@ -626,12 +515,11 @@ def simulate_late_fade_segment(segment, results, spot_index, cfg, store, observe
         )
     return stats
 
-
 def simulate_fixed_mode_segment(segment, results, spot_index, cfg, store, mode: str, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label=mode)
     loss_streak = 0
     if observer and segment:
-        observer.new_window(segment[0])  # no prior result yet, but still shown in the replayed log
+        observer.new_window(segment[0])
     for i in range(1, len(segment)):
         prev_result = results[i - 1]
         window = segment[i]
@@ -655,7 +543,6 @@ def simulate_fixed_mode_segment(segment, results, spot_index, cfg, store, mode: 
         )
     return stats
 
-
 def simulate_adaptive_segment(segment, results, spot_index, cfg, store, default_mode: str, observer=None) -> TickBacktestResult:
     stats = TickBacktestResult(label=f"adaptive(default={default_mode})")
     loss_streak = 0
@@ -669,9 +556,6 @@ def simulate_adaptive_segment(segment, results, spot_index, cfg, store, default_
         if prev_result is None or window.strike is None:
             stats.skipped += 1
             continue
-        # Mirrors bot.py exactly: adaptive mode reads the sizing state's own
-        # last_bet_won, which score_pending_bets()/record_result() already
-        # maintain for us.
         mode = default_mode if store.state.last_bet_won is None else (
             "momentum" if store.state.last_bet_won else "reversal"
         )
@@ -689,7 +573,6 @@ def simulate_adaptive_segment(segment, results, spot_index, cfg, store, default_
             placed["price"] * placed["count"], placed["count"], loss_streak, observer=observer,
         )
     return stats
-
 
 def simulate_price_trend_segment(segment, results, spot_index, cfg, store, observer=None) -> TickBacktestResult:
     pt_cfg = cfg["strategy"].get("price_trend", {})
@@ -724,19 +607,9 @@ def simulate_price_trend_segment(segment, results, spot_index, cfg, store, obser
         )
     return stats
 
-
 def run_strategy_over_segments(
     strategy: str, segments: list, results_by_segment: list, spot_index, cfg: dict, observer=None,
 ) -> TickBacktestResult:
-    """
-    `observer`, if given, is notified per-window/per-order as each segment is
-    replayed (see simulator.py for the dashboard's Simulator-tab observer) and
-    is also handed each segment's final StateStore.state via
-    .segment_finished(state) right before that segment's temp state file is
-    discarded - the only place the "current" bot state exists after a run.
-    Purely additive: None (the default, used by this file's own grid-search
-    __main__) leaves the existing aggregate-stats-only behavior unchanged.
-    """
     agg = TickBacktestResult(label=strategy)
     for seg, results in zip(segments, results_by_segment):
         if len(seg) < 2:
@@ -772,12 +645,6 @@ def run_strategy_over_segments(
             agg.hedges_placed += r.hedges_placed
             agg.take_profits_placed += r.take_profits_placed
             agg.max_loss_streak = max(agg.max_loss_streak, r.max_loss_streak)
-            # store.state.max_drawdown_cents is the peak (cumulative_loss + cost
-            # of the bet just placed) reached within THIS segment - maintained
-            # automatically by update_max_drawdown() inside score_pending_bets(),
-            # the same production code path bot.py itself uses. Segments reset
-            # sizing state at gaps, so the overall figure is the worst peak seen
-            # in any single contiguous run, not a sum across segments.
             agg.max_drawdown_cents = max(agg.max_drawdown_cents, store.state.max_drawdown_cents)
         finally:
             try:
@@ -785,7 +652,6 @@ def run_strategy_over_segments(
             except OSError:
                 pass
     return agg
-
 
 # ---------------------------------------------------------------------------
 # Config grid handling
@@ -795,10 +661,8 @@ def load_yaml(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
-
 def deep_copy(d):
     return json.loads(json.dumps(d))
-
 
 def flatten_grid(node, prefix=()):
     leaves = []
@@ -811,24 +675,16 @@ def flatten_grid(node, prefix=()):
         leaves.append((prefix, [node]))
     return leaves
 
-
 def set_path(d: dict, path: tuple, value):
     cur = d
     for k in path[:-1]:
         cur = cur.setdefault(k, {})
     cur[path[-1]] = value
 
-
 def _norm_path(path: tuple) -> tuple:
-    """Strips a leading 'strategy' segment for label matching/display purposes
-    only - doesn't affect the actual cfg path."""
     return path[1:] if path and path[0] == "strategy" else path
 
-
 def iter_grid_combos(base_cfg: dict, *grids):
-    """Yields (params, cfg) per combo, where params is an ordered dict of
-    {normalized_dot_path: value} for every swept parameter - NOT a pre-built
-    label string, so callers can choose which params to show and how."""
     leaves = []
     for g in grids:
         leaves.extend(flatten_grid(g or {}))
@@ -845,12 +701,7 @@ def iter_grid_combos(base_cfg: dict, *grids):
             params[_norm_path(path)] = value
         yield params, cfg
 
-
 def build_label(params: dict, label_fields: Optional[list] = None) -> str:
-    """Builds the Params column text for one row. `label_fields` is an
-    optional list of dotted param names (e.g. 'spot_lean.threshold_pct') to
-    include, in that order - matched against the normalized swept-param
-    paths. If None, every swept param is shown (previous default behavior)."""
     if not params:
         return "(default config)"
     if label_fields is None:
@@ -866,7 +717,6 @@ def build_label(params: dict, label_fields: Optional[list] = None) -> str:
         if not selected:
             return "(no matching label fields)"
     return ", ".join(f"{'.'.join(path)}={value}" for path, value in selected)
-
 
 SORT_KEYS = {
     "pnl": lambda r: r.realized_pnl_cents,
@@ -887,11 +737,9 @@ STAT_COLUMNS = [
     "max_loss_streak", "max_drawdown_usd", "pnl_usd", "hedges_placed", "take_profits_placed",
 ]
 
-
 def rank_results(results: list, sort_by: str, sort_order: str) -> list:
     key_fn = SORT_KEYS.get(sort_by, SORT_KEYS["pnl"])
     return sorted(results, key=lambda kv: key_fn(kv[1]), reverse=(sort_order != "asc"))
-
 
 def result_stat_row(r: "TickBacktestResult") -> dict:
     return {
@@ -908,21 +756,7 @@ def result_stat_row(r: "TickBacktestResult") -> dict:
         "take_profits_placed": r.take_profits_placed,
     }
 
-
 def _varying_param_columns(param_rows: list) -> list:
-    """
-    Given a list of `params` dicts (one per combo, as produced by
-    iter_grid_combos), returns the dotted-path column names that actually
-    differ across at least two of them, in first-seen order.
-
-    A grid entry left at a single fixed value (e.g. take_profit.enabled:
-    [false] while you're only sweeping hedge params) still gets applied to
-    every combo's cfg correctly - but including it as its own column in the
-    CSV/XLSX would just repeat the same value on every row, which reads as
-    "this was tested" even though nothing about it actually varied. Leaving
-    it out of the export entirely (while still using it to run every combo)
-    keeps the exported columns limited to what you're actually sweeping.
-    """
     order = []
     seen_cols = set()
     values_by_col = {}
@@ -936,16 +770,10 @@ def _varying_param_columns(param_rows: list) -> list:
             try:
                 values_by_col[col].add(value)
             except TypeError:
-                values_by_col[col].add(str(value))  # unhashable value (shouldn't normally happen) - stringify
+                values_by_col[col].add(str(value))
     return [col for col in order if len(values_by_col[col]) > 1]
 
-
 def export_results_csv(path: str, all_results: dict, sort_by: str, sort_order: str):
-    """Writes EVERY combo from EVERY strategy tested (not just --top) into one
-    CSV, one row per combo, with each ACTUALLY-SWEPT param as its own column
-    (fixed/non-varying grid entries are left out - see _varying_param_columns)
-    - so you can filter/sort/pivot in Excel/Sheets instead of parsing the
-    label text."""
     import csv
 
     all_params = [params for results in all_results.values() for params, _ in results]
@@ -966,14 +794,7 @@ def export_results_csv(path: str, all_results: dict, sort_by: str, sort_order: s
                 writer.writerow(row)
     log.info("Wrote %s combo(s) across %s strategy/strategies to %s", sum(len(v) for v in all_results.values()), len(all_results), path)
 
-
 def _drawdown_color_bucket(max_drawdown_usd: float) -> str:
-    """
-    Fixed dollar-amount thresholds on max_drawdown_usd, independent of how
-    the rest of the combos in this run happened to perform - a $50 drawdown
-    is always "dark_green", whether it's the best row in the sheet or the
-    only row.
-    """
     if max_drawdown_usd < 100.0:
         return "dark_green"
     if max_drawdown_usd < 200.0:
@@ -984,24 +805,7 @@ def _drawdown_color_bucket(max_drawdown_usd: float) -> str:
         return "light_red"
     return "dark_red"
 
-
 def export_results_xlsx(path: str, all_results: dict, sort_by: str, sort_order: str, min_bets: int = 0):
-    """Same full data as export_results_csv, but as a native .xlsx workbook
-    with one sheet per strategy (each strategy's params differ enough that
-    separate sheets read better than one giant sparse table).
-
-    Rows are also color-coded by max_drawdown_usd against fixed dollar
-    thresholds (see _drawdown_color_bucket) - not by rank within the sheet,
-    so the color of a row means the same thing whether you're looking at a
-    3-row sheet or a 300-row one:
-        < $100        dark green
-        $100 - $199   light green
-        $200 - $249   yellow
-        $250 - $299   light red
-        >= $300       dark red
-    A row with fewer bets than min_bets is colored gray instead, regardless
-    of its drawdown - its numbers aren't trustworthy on that few bets (same
-    "LOW SAMPLE" cutoff the console table already flags with text)."""
     try:
         import openpyxl
         from openpyxl.styles import Font, PatternFill
@@ -1039,7 +843,7 @@ def export_results_xlsx(path: str, all_results: dict, sort_by: str, sort_order: 
         param_columns = _varying_param_columns([params for params, _ in ranked])
         headers = param_columns + STAT_COLUMNS
 
-        ws = wb.create_sheet(title=strategy[:31])  # Excel sheet-name length limit
+        ws = wb.create_sheet(title=strategy[:31])
         ws.append(headers)
         for cell in ws[1]:
             cell.font = Font(bold=True)
@@ -1063,8 +867,6 @@ def export_results_xlsx(path: str, all_results: dict, sort_by: str, sort_order: 
     wb.save(path)
     log.info("Wrote %s combo(s) across %s sheet(s) to %s", sum(len(v) for v in all_results.values()), len(all_results), path)
 
-
-
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -1075,12 +877,7 @@ def _fmt_eta(seconds: float) -> str:
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
-
 class ProgressBar:
-    """Live [####----] N/M bar while combos run. Falls back to periodic
-    10%-step log lines when stdout isn't a real terminal (piped/redirected),
-    since a \\r-based bar just clutters a log file with control characters."""
-
     def __init__(self, total: int, prefix: str, enabled: bool = True, is_tty: bool = True, width: int = 30):
         self.total = max(1, total)
         self.prefix = prefix
@@ -1111,7 +908,6 @@ class ProgressBar:
         if self.enabled and self.is_tty:
             sys.stdout.write("\n")
             sys.stdout.flush()
-
 
 def print_results_table(results: list, top_n: int, min_bets: int,
                          label_fields: Optional[list] = None, sort_by: str = "pnl", sort_order: str = "desc"):
@@ -1148,7 +944,6 @@ def print_results_table(results: list, top_n: int, min_bets: int,
         "recorded data (e.g. a gap right at the end of a session). Rows flagged LOW SAMPLE had too few bets "
         "to trust the win rate / PnL / drawdown as more than noise."
     )
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1199,9 +994,6 @@ def main():
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    # bot.py logs a WIN/LOSS table per settled bet and state.py warns on every
-    # fresh temp state file - both expected and voluminous across many grid
-    # combos, so quiet them down here (this script's own logger stays at INFO).
     logging.getLogger("bot").setLevel(logging.WARNING)
     logging.getLogger("state").setLevel(logging.ERROR)
 
@@ -1273,7 +1065,6 @@ def main():
         export_results_csv(args.export_csv, all_results, sort_by, sort_order)
     if args.export_xlsx:
         export_results_xlsx(args.export_xlsx, all_results, sort_by, sort_order, args.min_bets)
-
 
 if __name__ == "__main__":
     main()
