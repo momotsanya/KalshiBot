@@ -1,4 +1,4 @@
-// V1.2
+// V1.7
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -713,9 +713,15 @@ function wireConfigFields() {
   bindField("sizing_base_size", ["sizing", "base_size"], "number");
   bindField("sizing_fee_per_contract_cents", ["sizing", "fee_per_contract_cents"], "number");
   bindField("sizing_martingale_multiplier", ["sizing", "martingale_multiplier"], "number");
+  bindField("sizing_martingale_unit", ["sizing", "martingale_unit"], "number");
   bindField("sizing_max_martingale_steps", ["sizing", "max_martingale_steps"], "number");
   bindField("sizing_max_stake", ["sizing", "max_stake"], "number");
   bindField("sizing_dalembert_unit", ["sizing", "dalembert_unit"], "number");
+  bindField("dr_profit_lock_cents", ["sizing", "dalembert_reverse", "profit_lock_cents"], "number");
+  bindField("dr_loss_floor_cents", ["sizing", "dalembert_reverse", "loss_floor_cents"], "number");
+  bindField("am_unit", ["sizing", "anti_martingale", "unit"], "number");
+  bindField("am_multiplier", ["sizing", "anti_martingale", "multiplier"], "number");
+  bindField("sizing_max_anti_martingale_steps", ["sizing", "max_anti_martingale_steps"], "number");
 
   bindField("recovery_min_profit_cents", ["recovery", "min_profit_cents"], "number");
   bindField("recovery_max_contracts", ["recovery", "max_contracts"], "number");
@@ -742,14 +748,16 @@ function wireConfigFields() {
   bindField("sl_threshold_pct", ["strategy", "spot_lean", "threshold_pct"], "number");
   bindField("sl_poll_interval_sec", ["strategy", "spot_lean", "poll_interval_sec"], "number");
 
-  bindField("hedge_enabled", ["strategy", "spot_lean", "hedge", "enabled"], "toggle");
-  bindField("hedge_threshold_pct", ["strategy", "spot_lean", "hedge", "threshold_pct"], "number");
-  bindField("hedge_max_hedges_per_window", ["strategy", "spot_lean", "hedge", "max_hedges_per_window"], "number");
-  bindField("hedge_fresh_start_only", ["strategy", "spot_lean", "hedge", "fresh_start_only"], "toggle");
-  bindField("hedge_net_session_sizing", ["strategy", "spot_lean", "hedge", "net_session_sizing"], "toggle");
-  bindField("hedge_smart_sizing", ["strategy", "spot_lean", "hedge", "smart_sizing"], "toggle");
-  bindField("hedge_min_profit_cents", ["strategy", "spot_lean", "hedge", "min_profit_cents"], "number");
-  bindField("hedge_max_contracts", ["strategy", "spot_lean", "hedge", "max_contracts"], "number");
+  bindField("lf_threshold_pct", ["strategy", "late_fade", "threshold_pct"], "number");
+
+  bindField("hedge_enabled", ["strategy", "hedge", "enabled"], "toggle");
+  bindField("hedge_threshold_pct", ["strategy", "hedge", "threshold_pct"], "number");
+  bindField("hedge_max_hedges_per_window", ["strategy", "hedge", "max_hedges_per_window"], "number");
+  bindField("hedge_fresh_start_only", ["strategy", "hedge", "fresh_start_only"], "toggle");
+  bindField("hedge_net_session_sizing", ["strategy", "hedge", "net_session_sizing"], "toggle");
+  bindField("hedge_smart_sizing", ["strategy", "hedge", "smart_sizing"], "toggle");
+  bindField("hedge_min_profit_cents", ["strategy", "hedge", "min_profit_cents"], "number");
+  bindField("hedge_max_contracts", ["strategy", "hedge", "max_contracts"], "number");
 
   bindField("lt_enabled", ["live_tick", "enabled"], "toggle");
   bindField("lt_interval_sec", ["live_tick", "interval_sec"], "number");
@@ -761,6 +769,22 @@ function wireConfigFields() {
       currentEnv = btn.dataset.val;
       setPath(cfg, ["kalshi", "base_url"], BASE_URLS[currentEnv]);
       renderEnvSeg();
+      onConfigFieldChanged();
+    });
+  });
+
+  document.querySelectorAll("#martingaleVariantSeg button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setPath(cfg, ["sizing", "martingale_variant"], btn.dataset.val);
+      renderMartingaleVariantSeg();
+      onConfigFieldChanged();
+    });
+  });
+
+  document.querySelectorAll("#amVariantSeg button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setPath(cfg, ["sizing", "anti_martingale", "variant"], btn.dataset.val);
+      renderAmVariantSeg();
       onConfigFieldChanged();
     });
   });
@@ -787,6 +811,16 @@ function renderEnvSeg() {
   document.querySelectorAll("#envSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === currentEnv));
 }
 
+function renderMartingaleVariantSeg() {
+  const variant = getPath(cfg, ["sizing", "martingale_variant"]) || "multiplier";
+  document.querySelectorAll("#martingaleVariantSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === variant));
+}
+
+function renderAmVariantSeg() {
+  const variant = getPath(cfg, ["sizing", "anti_martingale", "variant"]) || "plus";
+  document.querySelectorAll("#amVariantSeg button").forEach((b) => b.classList.toggle("on", b.dataset.val === variant));
+}
+
 function renderModeState() {
   const mode = getPath(cfg, ["strategy", "mode"]);
   document.querySelectorAll(".strategy-tab").forEach((t) => t.classList.toggle("is-selected", t.dataset.tab === mode));
@@ -800,15 +834,18 @@ function renderModeState() {
 function renderSizingVisibility() {
   const mode = getPath(cfg, ["sizing", "mode"]);
   const isRecovery = mode === "recovery";
-  const isDalembert = mode === "dalembert";
+  const isDalembert = mode === "dalembert" || mode === "dalembert_reverse";
+  const isDalembertReverse = mode === "dalembert_reverse";
+  const isAntiMartingale = mode === "anti_martingale";
   document.getElementById("recoveryFields").classList.toggle("dimmed", !isRecovery);
   document.getElementById("dalembertFields").classList.toggle("dimmed", !isDalembert);
-  document.getElementById("martingaleFields").style.opacity = (isRecovery || isDalembert) ? "0.4" : "1";
+  document.getElementById("dalembertReverseFields").classList.toggle("dimmed", !isDalembertReverse);
+  document.getElementById("antiMartingaleFields").classList.toggle("dimmed", !isAntiMartingale);
+  document.getElementById("martingaleFields").style.opacity = (isRecovery || isDalembert || isAntiMartingale) ? "0.4" : "1";
 }
 
 function renderHedgeVisibility() {
-  const enabled = !!getPath(cfg, ["strategy", "spot_lean", "hedge", "enabled"]);
-  const smart = !!getPath(cfg, ["strategy", "spot_lean", "hedge", "smart_sizing"]);
+  const enabled = !!getPath(cfg, ["strategy", "hedge", "enabled"]);
   document.getElementById("hedgeSub").classList.toggle("dimmed", !enabled);
 }
 
@@ -838,6 +875,8 @@ function renderConfigDerived() {
   const baseUrl = getPath(cfg, ["kalshi", "base_url"]) || "";
   currentEnv = baseUrl.includes("demo") ? "demo" : "production";
   renderEnvSeg();
+  renderMartingaleVariantSeg();
+  renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
   renderHedgeVisibility();
@@ -846,6 +885,8 @@ function renderConfigDerived() {
 }
 
 function onConfigFieldChanged() {
+  renderMartingaleVariantSeg();
+  renderAmVariantSeg();
   renderModeState();
   renderSizingVisibility();
   renderHedgeVisibility();
@@ -903,50 +944,49 @@ document.getElementById("btn-save-config").addEventListener("click", async () =>
 // ============================================================
 // Simulator tab
 // ============================================================
-// The chart's data source is the simulation's own settlement log - each
-// entry is one settled window's "Total PnL" (the running balance bot.py's
-// own WIN/LOSS/SESSION NET tables report) plus that settlement's contract
-// Count and win/loss result - NOT the raw ./data/*.jsonl price ticks. So
-// there is nothing to chart until a simulation has actually been run.
-const SIM_CHART_COUNT = 40; // settled bets per chart page
-let simPnlSeries = [];      // from the last /api/simulator/run: [{time, total_pnl_cents, contracts, result}, ...]
-let simChartOffset = 0;     // settled bets back from the most recent one (0 = latest)
+const SIM_CHART_COUNT = 20; // windows per chart page
+let simChartData = null;    // last-fetched chart chunk: {windows, ticks, total_windows, offset, start_index, end_index}
+let simMarkers = [];        // order markers from the most recent /api/simulator/run
+let simChartLoadedOnce = false;
 
-function simChartChunk() {
-  const total = simPnlSeries.length;
-  const endIdx = Math.max(0, total - simChartOffset);
-  const startIdx = Math.max(0, endIdx - SIM_CHART_COUNT);
-  return { chunk: simPnlSeries.slice(startIdx, endIdx), startIdx, endIdx, total };
+async function loadSimChart(offset) {
+  const rangeEl = document.getElementById("sim-chart-range");
+  try {
+    const res = await fetch(`/api/simulator/chart?offset=${offset}&count=${SIM_CHART_COUNT}`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      rangeEl.textContent = data.error || "Could not load tick data.";
+      return;
+    }
+    simChartData = data;
+    renderSimChartRange();
+    drawSimChart(data, simMarkers);
+  } catch (e) {
+    rangeEl.textContent = "Could not reach the server.";
+  }
 }
 
-function renderSimChart() {
+function renderSimChartRange() {
   const rangeEl = document.getElementById("sim-chart-range");
   const prevBtn = document.getElementById("sim-chart-prev");
   const nextBtn = document.getElementById("sim-chart-next");
-
-  if (!simPnlSeries.length) {
-    rangeEl.textContent = "Run a simulation to see the P&L curve.";
+  if (!simChartData || !simChartData.windows.length) {
+    rangeEl.textContent = "No tick data found - run the bot with live_tick.enabled: true first.";
     prevBtn.disabled = true;
     nextBtn.disabled = true;
-    drawSimChart([]);
     return;
   }
-
-  const { chunk, startIdx, endIdx, total } = simChartChunk();
+  const first = new Date(simChartData.windows[0].open_time);
+  const last = new Date(simChartData.windows[simChartData.windows.length - 1].close_time);
   const fmt = (d) => d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-  if (chunk.length) {
-    const first = new Date(chunk[0].time);
-    const last = new Date(chunk[chunk.length - 1].time);
-    rangeEl.textContent = `${fmt(first)} \u2192 ${fmt(last)}  (bets ${startIdx + 1}-${endIdx} of ${total})`;
-  } else {
-    rangeEl.textContent = `No settled bets in this range (0 of ${total})`;
-  }
-  prevBtn.disabled = startIdx <= 0;
-  nextBtn.disabled = endIdx >= total;
-  drawSimChart(chunk);
+  rangeEl.textContent =
+    `${fmt(first)} \u2192 ${fmt(last)}  ` +
+    `(windows ${simChartData.start_index + 1}-${simChartData.end_index} of ${simChartData.total_windows})`;
+  prevBtn.disabled = simChartData.start_index <= 0;
+  nextBtn.disabled = simChartData.offset <= 0;
 }
 
-function drawSimChart(chunk) {
+function drawSimChart(data, markers) {
   const canvas = document.getElementById("sim-chart-canvas");
   const dpr = window.devicePixelRatio || 1;
   const cssWidth = canvas.clientWidth || 800;
@@ -957,75 +997,89 @@ function drawSimChart(chunk) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-  if (!chunk || !chunk.length) {
+  const ticks = (data.ticks || []).filter((t) => t.spot != null);
+  if (!ticks.length) {
     ctx.fillStyle = "#5C5F66";
     ctx.font = "12px monospace";
-    ctx.fillText("No settled bets to chart yet - run a simulation first.", 12, cssHeight / 2);
+    ctx.fillText("No spot price data in this range.", 12, cssHeight / 2);
     return;
   }
 
-  const padL = 62, padR = 12, padT = 16, padB = 4;
-  const plotW = Math.max(1, cssWidth - padL - padR);
-  const lineH = Math.round((cssHeight - padT - padB) * 0.66);   // Total PnL curve, upper portion
-  const barTop = padT + lineH + 22;                             // Count bars, lower portion
-  const barH = Math.max(20, cssHeight - barTop - padB);
-
-  const times = chunk.map((p) => new Date(p.time).getTime());
+  const times = ticks.map((t) => new Date(t.t).getTime());
+  const spots = ticks.map((t) => t.spot);
+  const strikes = (data.windows || []).map((w) => w.strike).filter((s) => s != null);
   const minT = Math.min(...times), maxT = Math.max(...times);
+  const allY = spots.concat(strikes);
+  const minY = Math.min(...allY), maxY = Math.max(...allY);
+  const padY = (maxY - minY) * 0.08 || 1;
+  const yLo = minY - padY, yHi = maxY + padY;
+
+  const padL = 62, padR = 12, padT = 10, padB = 10;
+  const plotW = Math.max(1, cssWidth - padL - padR);
+  const plotH = Math.max(1, cssHeight - padT - padB);
   const xOf = (t) => padL + ((t - minT) / (maxT - minT || 1)) * plotW;
+  const yOf = (v) => padT + (1 - (v - yLo) / (yHi - yLo || 1)) * plotH;
 
-  // ---- Total PnL curve (upper) ----
-  const pnls = chunk.map((p) => p.total_pnl_cents / 100);
-  const minPnl = Math.min(0, ...pnls), maxPnl = Math.max(0, ...pnls);
-  const padPnl = (maxPnl - minPnl) * 0.12 || 1;
-  const pnlLo = minPnl - padPnl, pnlHi = maxPnl + padPnl;
-  const yOfPnl = (v) => padT + (1 - (v - pnlLo) / (pnlHi - pnlLo || 1)) * lineH;
+  // Window boundary gridlines + each window's own floor_strike as a flat
+  // reference segment - this is the line spot_lean bets against.
+  (data.windows || []).forEach((w) => {
+    const xStart = xOf(new Date(w.open_time).getTime());
+    ctx.strokeStyle = "#2B2E34";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(xStart, padT);
+    ctx.lineTo(xStart, padT + plotH);
+    ctx.stroke();
 
-  ctx.strokeStyle = "#2B2E34";
-  ctx.lineWidth = 1;
-  const zeroY = yOfPnl(0);
-  ctx.beginPath();
-  ctx.moveTo(padL, zeroY);
-  ctx.lineTo(padL + plotW, zeroY);
-  ctx.stroke();
+    if (w.strike != null) {
+      const xEnd = xOf(new Date(w.close_time).getTime());
+      const y = yOf(w.strike);
+      ctx.strokeStyle = "#7A5420";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(xStart, y);
+      ctx.lineTo(xEnd, y);
+      ctx.stroke();
+    }
+  });
 
+  // Live BTC spot price curve.
   ctx.strokeStyle = "#E0982F";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  chunk.forEach((p, i) => {
-    const x = xOf(new Date(p.time).getTime());
-    const y = yOfPnl(p.total_pnl_cents / 100);
+  ticks.forEach((t, i) => {
+    const x = xOf(new Date(t.t).getTime());
+    const y = yOf(t.spot);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
 
-  chunk.forEach((p) => {
-    const x = xOf(new Date(p.time).getTime());
-    const y = yOfPnl(p.total_pnl_cents / 100);
-    ctx.beginPath();
-    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-    ctx.fillStyle = p.result === "win" ? "#4FAE72" : "#DB5B52";
-    ctx.fill();
-  });
-
   ctx.fillStyle = "#8A8D95";
   ctx.font = "10px monospace";
-  ctx.fillText(`$${pnlHi.toFixed(2)}`, 4, padT + 8);
-  ctx.fillText(`$${pnlLo.toFixed(2)}`, 4, padT + lineH);
-  ctx.fillText("Total PnL", padL, padT - 4);
+  ctx.fillText(`$${yHi.toFixed(0)}`, 4, padT + 8);
+  ctx.fillText(`$${yLo.toFixed(0)}`, 4, padT + plotH);
 
-  // ---- Count bars (lower) - green = winning bet, red = losing bet ----
-  const counts = chunk.map((p) => p.contracts || 0);
-  const maxCount = Math.max(...counts, 1);
-  const barW = Math.max(2, Math.min(16, plotW / chunk.length - 3));
-  chunk.forEach((p) => {
-    const x = xOf(new Date(p.time).getTime());
-    const h = ((p.contracts || 0) / maxCount) * (barH - 4);
-    ctx.fillStyle = p.result === "win" ? "#4FAE72" : "#DB5B52";
-    ctx.fillRect(x - barW / 2, barTop + (barH - 4 - h), barW, h);
+  // Order markers from the last simulation run: green dot = UP (yes),
+  // red dot = DOWN (no), placed on the spot curve at the order's own time.
+  (markers || []).forEach((m) => {
+    const mt = new Date(m.time).getTime();
+    if (mt < minT || mt > maxT) return; // outside the currently-viewed chunk
+    let nearest = ticks[0];
+    let bestDiff = Infinity;
+    for (const t of ticks) {
+      const diff = Math.abs(new Date(t.t).getTime() - mt);
+      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
+    }
+    const x = xOf(mt);
+    const y = yOf(nearest.spot);
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = m.side === "yes" ? "#4FAE72" : "#DB5B52";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#16181C";
+    ctx.stroke();
   });
-  ctx.fillStyle = "#8A8D95";
-  ctx.fillText("Count", padL, barTop - 6);
 }
 
 function fmtSimDollars(v) {
@@ -1071,12 +1125,12 @@ function appendSimLogLines(lines) {
 
 function wireSimulatorTab() {
   document.getElementById("sim-chart-prev").addEventListener("click", () => {
-    simChartOffset = Math.min(simPnlSeries.length, simChartOffset + SIM_CHART_COUNT);
-    renderSimChart();
+    if (!simChartData) return;
+    loadSimChart(simChartData.offset + SIM_CHART_COUNT);
   });
   document.getElementById("sim-chart-next").addEventListener("click", () => {
-    simChartOffset = Math.max(0, simChartOffset - SIM_CHART_COUNT);
-    renderSimChart();
+    if (!simChartData) return;
+    loadSimChart(Math.max(0, simChartData.offset - SIM_CHART_COUNT));
   });
 
   document.getElementById("btn-run-sim").addEventListener("click", async () => {
@@ -1095,12 +1149,11 @@ function wireSimulatorTab() {
       }
       statusEl.textContent =
         `Done - ${data.windows_simulated} window(s), ${data.segments} segment(s), strategy=${data.strategy}`;
-      simPnlSeries = data.pnl_series || [];
-      simChartOffset = 0; // jump to the latest data
+      simMarkers = data.markers || [];
       renderSimStats(data.stats || {}, data.final_state || {});
       document.getElementById("sim-log-view").innerHTML = "";
       appendSimLogLines(data.log_lines || []);
-      renderSimChart();
+      await loadSimChart(0); // jump to the latest data and overlay the new markers
     } catch (e) {
       statusEl.textContent = "Failed: network error";
       statusEl.className = "save-status err";
@@ -1109,11 +1162,13 @@ function wireSimulatorTab() {
     }
   });
 
-  // Nothing to chart until a simulation has actually been run, so just show
-  // the placeholder state the first time the Simulator tab is opened.
+  // Chart data is only fetched the first time the Simulator tab is actually opened.
   document.querySelectorAll('.tab-btn[data-tab="simulator"]').forEach((btn) => {
     btn.addEventListener("click", () => {
-      if (!simPnlSeries.length) renderSimChart();
+      if (!simChartLoadedOnce) {
+        simChartLoadedOnce = true;
+        loadSimChart(0);
+      }
     });
   });
 }
