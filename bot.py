@@ -1,4 +1,4 @@
-# V1.7
+# V1.8
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -245,19 +245,33 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
 
         outcomes.append((pending, won, cost_cents, pnl_cents))
 
-    # How much cash was tied up at the deepest point of this session: whatever was
-    # already unrecovered from BEFORE this session (cumulative_loss_cents) plus the
-    # combined cost of every bet placed in this session (a main + hedge bet are both
-    # outstanding simultaneously until settlement, so their costs stack, not replace
-    # each other). Computed once per session, not per individual bet.
+    # How much cash was tied up at the deepest point of this session: whatever's
+    # already accumulated from consecutive prior LOSING sessions
+    # (current_loss_streak_cost_cents - tracked for every sizing.mode; see
+    # state.py) plus the combined cost of every bet placed THIS session (a
+    # main + hedge bet are both outstanding simultaneously until settlement,
+    # so their costs stack, not replace each other). Computed once per
+    # session, not per individual bet.
+    #
+    # NOTE: this used to add store.state.cumulative_loss_cents here instead
+    # of current_loss_streak_cost_cents. cumulative_loss_cents only exists
+    # for sizing.mode="recovery" and stays 0 for every other mode, so for
+    # "contracts"/"dollars"/"dalembert"/"dalembert_reverse"/"anti_martingale"
+    # drawdown_now_cents collapsed to just session_total_cost_cents - i.e.
+    # Max Drawdown only ever reflected the single biggest bet's own cost,
+    # never the accumulated cost of a losing streak. Fixed in V1.8.
     session_total_cost_cents = sum(cost for _, _, cost, _ in outcomes)
-    drawdown_now_cents = store.state.cumulative_loss_cents + session_total_cost_cents
+    session_net_pnl_cents = sum(pnl for _, _, _, pnl in outcomes)
+    session_won = session_net_pnl_cents >= 0
+
+    drawdown_now_cents = store.state.current_loss_streak_cost_cents + session_total_cost_cents
     store.update_max_drawdown(drawdown_now_cents)
+    store.update_loss_streak_cost(session_total_cost_cents, session_won)
 
     use_net_session = net_session_sizing and len(outcomes) > 1
 
     if use_net_session:
-        net_pnl_cents = sum(pnl for _, _, _, pnl in outcomes)
+        net_pnl_cents = session_net_pnl_cents
         session_won = net_pnl_cents >= 0
         if sizing_mode == "recovery":
             store.record_recovery_result(

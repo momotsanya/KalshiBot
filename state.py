@@ -1,4 +1,4 @@
-# V1.4
+# V1.5
 """
 Persists martingale stake + the pending bet so the bot can resume correctly
 after a restart (crucial: martingale sizing depends on the outcome of the
@@ -41,6 +41,16 @@ class BotState:
     max_drawdown_cents: int = 0  # peak (cumulative_loss_cents + cost of the bet just placed) ever reached
     dalembert_reverse_pnl_cents: int = 0  # for sizing.mode="dalembert_reverse": running net PnL since the last profit-lock/loss-floor reset (or fresh start)
     consecutive_wins: int = 0  # for sizing.mode="anti_martingale": current win streak length, reset on any loss (mirrors consecutive_losses for classic martingale)
+    # Mode-agnostic running total of cost paid on CONSECUTIVE LOSING sessions
+    # (a "session" = one settled window's bet, or a main+hedge combo scored
+    # together). Used ONLY to compute max_drawdown_cents correctly for
+    # EVERY sizing.mode - not just "recovery", whose own cumulative_loss_cents
+    # field only tracks that one mode's own bet-sizing debt and stays at 0
+    # for every other mode (contracts/dollars/dalembert/dalembert_reverse/
+    # anti_martingale), which is what made max_drawdown_cents collapse to
+    # "just the last bet's own cost" for those modes (see bot.py V1.8 fix).
+    # Resets to 0 the instant a session's net result is a win.
+    current_loss_streak_cost_cents: int = 0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -101,6 +111,22 @@ class StateStore:
             self.state.max_drawdown_cents = candidate_cents
         self.save()
 
+    def update_loss_streak_cost(self, session_cost_cents: int, session_won: bool):
+        """
+        Call once per settled session, right alongside update_max_drawdown(),
+        regardless of sizing.mode. Resets the running streak-cost total to 0
+        on a win; otherwise adds this session's own cost on top of whatever
+        the current consecutive-loss streak already owes, so the NEXT
+        session's drawdown check correctly includes every prior consecutive
+        loss's cost - not just its own. This is what update_max_drawdown()'s
+        candidate_cents should be built from for every sizing.mode; see
+        bot.py's score_pending_bets() for the call site.
+        """
+        if session_won:
+            self.state.current_loss_streak_cost_cents = 0
+        else:
+            self.state.current_loss_streak_cost_cents += session_cost_cents
+        self.save()
 
     def record_recovery_result(self, net_pnl_cents: int, max_cumulative_loss_cents: int):
         """
