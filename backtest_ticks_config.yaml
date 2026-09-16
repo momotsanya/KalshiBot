@@ -85,7 +85,7 @@ grid:
         smart_sizing: [true]
         max_hedges_per_window: [0]
         min_profit_cents: [1]
-        max_contracts: [50000]
+        max_contracts: [500]
       # take_profit is the mirror of hedge - locks in a gain instead of
       # protecting against a loss. Left off (single-value list, so it
       # doesn't multiply the grid) by default - flip `enabled` to a swept
@@ -112,7 +112,7 @@ grid:
       # even though they're unused there, since grid combos are the full
       # cartesian product regardless of which values a given mode actually
       # reads) - raise --max-combos if runs get capped.
-      mode: ["contracts"]
+      mode: ["dalembert"]
       max_anti_martingale_steps: [100]
       anti_martingale:
         variant: ["plus"]
@@ -131,7 +131,7 @@ grid:
       # max_martingale_steps/max_stake still apply as the same circuit
       # breakers regardless of which variant is active.
       max_martingale_steps: [100]
-      martingale_variant: ["plus", "multiplier"]
+      martingale_variant: ["plus"]
       martingale_unit: [1]
       martingale_multiplier: [2]
       # dalembert_reverse shares dalembert_unit (swept separately isn't
@@ -147,12 +147,13 @@ grid:
   spot_lean:
     strategy:
       spot_lean:
-        threshold_pct: [0.01, 0.015]
+        threshold_pct: [0.02, 0.03]
 
   late_fade:
     strategy:
       late_fade:
-        threshold_pct: [0.0]
+        min_threshold_pct: [0.00]
+        max_threshold_pct: [0.005, 0.01, 0.015, 0.02, 0.025, 0.03]
 
   price_trend:
     strategy:
