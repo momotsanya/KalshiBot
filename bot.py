@@ -1,4 +1,4 @@
-# V1.8
+# V1.9
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -1258,30 +1258,37 @@ def run(cfg: dict):
 
                     elif configured_mode == "late_fade":
                         lf_cfg = cfg["strategy"].get("late_fade", {})
-                        lf_threshold_pct = lf_cfg.get("threshold_pct", 0.0)
-
+                        min_threshold_pct = lf_cfg.get("min_threshold_pct", 0.0)
+                        max_threshold_pct = lf_cfg.get("max_threshold_pct", 0.0)
+                        
                         current_market = find_market_for_window(client, series_ticker, window)
                         target_price_cache = [get_strike_price(current_market)]
+                        
+                        upper_display = max_threshold_pct if max_threshold_pct > 0 else "∞"
                         if target_price_cache[0] is None:
                             log.info("Late-fade: target price (floor_strike) not available yet - will keep checking.")
                         else:
-                            log.info("Late-fade: this window's target price (floor_strike) = $%s", f"{target_price_cache[0]:,.2f}")
+                            log.info(
+                                "Late-fade: this window's target price (floor_strike) = $%s (threshold range: %.3f%% to %s%%)",
+                                f"{target_price_cache[0]:,.2f}", min_threshold_pct, upper_display
+                            )
 
-                        def _late_fade_side_provider(_cache=target_price_cache, _threshold=lf_threshold_pct):
+                        def _late_fade_side_provider(_cache=target_price_cache, _min_th=min_threshold_pct, _max_th=max_threshold_pct):
                             if _cache[0] is None:
                                 m = find_market_for_window(client, series_ticker, window)
                                 _cache[0] = get_strike_price(m) if m else None
                                 if _cache[0] is None:
                                     return None
                                 log.info("Late-fade: target price (floor_strike) now available = $%s", f"{_cache[0]:,.2f}")
-
+                            
                             spot, spot_source = spot_price.get_btc_spot_price()
-                            chosen, gap_pct = decide_late_fade_side(spot, _cache[0], _threshold)
+                            chosen, gap_pct = decide_late_fade_side(spot, _cache[0], _min_th, _max_th)
+                            
                             if spot is not None and gap_pct is not None:
                                 log.info(
                                     "Late-fade: BTC spot from %s=$%s target=$%s gap=%+.3f%% -> %s (anticipating reversal)",
                                     spot_source, f"{spot:,.2f}", f"{_cache[0]:,.2f}", gap_pct,
-                                    label(chosen) if chosen else "no signal (too close to call)",
+                                    label(chosen) if chosen else "no signal (outside threshold range)",
                                 )
                             return chosen
 
