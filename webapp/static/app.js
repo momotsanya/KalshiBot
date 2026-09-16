@@ -1,4 +1,4 @@
-// V1.7
+// V1.8
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -748,7 +748,8 @@ function wireConfigFields() {
   bindField("sl_threshold_pct", ["strategy", "spot_lean", "threshold_pct"], "number");
   bindField("sl_poll_interval_sec", ["strategy", "spot_lean", "poll_interval_sec"], "number");
 
-  bindField("lf_threshold_pct", ["strategy", "late_fade", "threshold_pct"], "number");
+  bindField("lf_min_threshold_pct", ["strategy", "late_fade", "min_threshold_pct"], "number");
+  bindField("lf_max_threshold_pct", ["strategy", "late_fade", "max_threshold_pct"], "number");
 
   bindField("hedge_enabled", ["strategy", "hedge", "enabled"], "toggle");
   bindField("hedge_threshold_pct", ["strategy", "hedge", "threshold_pct"], "number");
@@ -944,49 +945,49 @@ document.getElementById("btn-save-config").addEventListener("click", async () =>
 // ============================================================
 // Simulator tab
 // ============================================================
-const SIM_CHART_COUNT = 20; // windows per chart page
-let simChartData = null;    // last-fetched chart chunk: {windows, ticks, total_windows, offset, start_index, end_index}
-let simMarkers = [];        // order markers from the most recent /api/simulator/run
-let simChartLoadedOnce = false;
+const SIM_CHART_COUNT = 40;   // settled bets per chart page
+let simPnlSeries = [];        // full pnl_series from the last /api/simulator/run: {time, ticker, total_pnl_cents, pnl_delta_cents, contracts, result}
+let simChartOffset = 0;       // bets back from the most recent (0 = latest page)
 
-async function loadSimChart(offset) {
-  const rangeEl = document.getElementById("sim-chart-range");
-  try {
-    const res = await fetch(`/api/simulator/chart?offset=${offset}&count=${SIM_CHART_COUNT}`);
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      rangeEl.textContent = data.error || "Could not load tick data.";
-      return;
-    }
-    simChartData = data;
-    renderSimChartRange();
-    drawSimChart(data, simMarkers);
-  } catch (e) {
-    rangeEl.textContent = "Could not reach the server.";
-  }
+function currentSimChartSlice() {
+  if (!simPnlSeries.length) return [];
+  const total = simPnlSeries.length;
+  const end = Math.max(0, total - simChartOffset);
+  const start = Math.max(0, end - SIM_CHART_COUNT);
+  return simPnlSeries.slice(start, end);
 }
 
 function renderSimChartRange() {
   const rangeEl = document.getElementById("sim-chart-range");
   const prevBtn = document.getElementById("sim-chart-prev");
   const nextBtn = document.getElementById("sim-chart-next");
-  if (!simChartData || !simChartData.windows.length) {
-    rangeEl.textContent = "No tick data found - run the bot with live_tick.enabled: true first.";
+  if (!simPnlSeries.length) {
+    rangeEl.textContent = "Run a simulation to see the P&L chart.";
     prevBtn.disabled = true;
     nextBtn.disabled = true;
     return;
   }
-  const first = new Date(simChartData.windows[0].open_time);
-  const last = new Date(simChartData.windows[simChartData.windows.length - 1].close_time);
+  const total = simPnlSeries.length;
+  const end = Math.max(0, total - simChartOffset);
+  const start = Math.max(0, end - SIM_CHART_COUNT);
+  const slice = simPnlSeries.slice(start, end);
+  if (!slice.length) {
+    rangeEl.textContent = "No settled bets in this range.";
+    prevBtn.disabled = start <= 0;
+    nextBtn.disabled = simChartOffset <= 0;
+    return;
+  }
+  const first = new Date(slice[0].time);
+  const last = new Date(slice[slice.length - 1].time);
   const fmt = (d) => d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   rangeEl.textContent =
     `${fmt(first)} \u2192 ${fmt(last)}  ` +
-    `(windows ${simChartData.start_index + 1}-${simChartData.end_index} of ${simChartData.total_windows})`;
-  prevBtn.disabled = simChartData.start_index <= 0;
-  nextBtn.disabled = simChartData.offset <= 0;
+    `(bets ${start + 1}-${end} of ${total})`;
+  prevBtn.disabled = start <= 0;
+  nextBtn.disabled = simChartOffset <= 0;
 }
 
-function drawSimChart(data, markers) {
+function drawSimChart(slice) {
   const canvas = document.getElementById("sim-chart-canvas");
   const dpr = window.devicePixelRatio || 1;
   const cssWidth = canvas.clientWidth || 800;
@@ -997,89 +998,92 @@ function drawSimChart(data, markers) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-  const ticks = (data.ticks || []).filter((t) => t.spot != null);
-  if (!ticks.length) {
+  if (!slice.length) {
     ctx.fillStyle = "#5C5F66";
     ctx.font = "12px monospace";
-    ctx.fillText("No spot price data in this range.", 12, cssHeight / 2);
+    ctx.fillText("No settled bets to chart yet - run a simulation.", 12, cssHeight / 2);
     return;
   }
 
-  const times = ticks.map((t) => new Date(t.t).getTime());
-  const spots = ticks.map((t) => t.spot);
-  const strikes = (data.windows || []).map((w) => w.strike).filter((s) => s != null);
-  const minT = Math.min(...times), maxT = Math.max(...times);
-  const allY = spots.concat(strikes);
-  const minY = Math.min(...allY), maxY = Math.max(...allY);
-  const padY = (maxY - minY) * 0.08 || 1;
-  const yLo = minY - padY, yHi = maxY + padY;
-
-  const padL = 62, padR = 12, padT = 10, padB = 10;
+  const padL = 62, padR = 12, padT = 10, padB = 4;
+  const countAreaH = 60;   // bottom strip reserved for the Count bars
+  const gapBetween = 14;   // gap between the PnL plot and the Count strip
+  const pnlPlotH = Math.max(1, cssHeight - padT - padB - countAreaH - gapBetween);
   const plotW = Math.max(1, cssWidth - padL - padR);
-  const plotH = Math.max(1, cssHeight - padT - padB);
-  const xOf = (t) => padL + ((t - minT) / (maxT - minT || 1)) * plotW;
-  const yOf = (v) => padT + (1 - (v - yLo) / (yHi - yLo || 1)) * plotH;
 
-  // Window boundary gridlines + each window's own floor_strike as a flat
-  // reference segment - this is the line spot_lean bets against.
-  (data.windows || []).forEach((w) => {
-    const xStart = xOf(new Date(w.open_time).getTime());
-    ctx.strokeStyle = "#2B2E34";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(xStart, padT);
-    ctx.lineTo(xStart, padT + plotH);
-    ctx.stroke();
+  const pnlValues = slice.map((p) => p.total_pnl_cents / 100);
+  const minPnl = Math.min(0, ...pnlValues);
+  const maxPnl = Math.max(0, ...pnlValues);
+  const padY = (maxPnl - minPnl) * 0.1 || 1;
+  const yLo = minPnl - padY, yHi = maxPnl + padY;
 
-    if (w.strike != null) {
-      const xEnd = xOf(new Date(w.close_time).getTime());
-      const y = yOf(w.strike);
-      ctx.strokeStyle = "#7A5420";
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(xStart, y);
-      ctx.lineTo(xEnd, y);
-      ctx.stroke();
-    }
-  });
+  const n = slice.length;
+  const xOf = (i) => (n === 1) ? padL + plotW / 2 : padL + (i / (n - 1)) * plotW;
+  const yOf = (v) => padT + (1 - (v - yLo) / (yHi - yLo || 1)) * pnlPlotH;
 
-  // Live BTC spot price curve.
+  // Zero line
+  ctx.strokeStyle = "#2B2E34";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, yOf(0));
+  ctx.lineTo(padL + plotW, yOf(0));
+  ctx.stroke();
+
+  // Total PnL curve (from the Simulation Log's "Total PnL", one point per settled bet)
   ctx.strokeStyle = "#E0982F";
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ticks.forEach((t, i) => {
-    const x = xOf(new Date(t.t).getTime());
-    const y = yOf(t.spot);
+  slice.forEach((p, i) => {
+    const x = xOf(i);
+    const y = yOf(p.total_pnl_cents / 100);
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   });
   ctx.stroke();
 
+  // Dot at each settled bet, colored by that bet's own result
+  slice.forEach((p, i) => {
+    const x = xOf(i);
+    const y = yOf(p.total_pnl_cents / 100);
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = p.result === "win" ? "#4FAE72" : "#DB5B52";
+    ctx.fill();
+  });
+
   ctx.fillStyle = "#8A8D95";
   ctx.font = "10px monospace";
-  ctx.fillText(`$${yHi.toFixed(0)}`, 4, padT + 8);
-  ctx.fillText(`$${yLo.toFixed(0)}`, 4, padT + plotH);
+  ctx.fillText(`$${yHi.toFixed(2)}`, 4, padT + 8);
+  ctx.fillText(`$${yLo.toFixed(2)}`, 4, padT + pnlPlotH);
 
-  // Order markers from the last simulation run: green dot = UP (yes),
-  // red dot = DOWN (no), placed on the spot curve at the order's own time.
-  (markers || []).forEach((m) => {
-    const mt = new Date(m.time).getTime();
-    if (mt < minT || mt > maxT) return; // outside the currently-viewed chunk
-    let nearest = ticks[0];
-    let bestDiff = Infinity;
-    for (const t of ticks) {
-      const diff = Math.abs(new Date(t.t).getTime() - mt);
-      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
-    }
-    const x = xOf(mt);
-    const y = yOf(nearest.spot);
-    ctx.beginPath();
-    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
-    ctx.fillStyle = m.side === "yes" ? "#4FAE72" : "#DB5B52";
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "#16181C";
-    ctx.stroke();
+  // ---- Count bars (bottom strip): contract count per bet, green=win, red=loss ----
+  const countTop = padT + pnlPlotH + gapBetween;
+  const maxContracts = Math.max(1, ...slice.map((p) => p.contracts || 0));
+  const barW = Math.max(1, (plotW / n) * 0.7);
+  const barAreaH = countAreaH - 14;
+
+  ctx.strokeStyle = "#2B2E34";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, countTop + barAreaH);
+  ctx.lineTo(padL + plotW, countTop + barAreaH);
+  ctx.stroke();
+
+  slice.forEach((p, i) => {
+    const x = xOf(i) - barW / 2;
+    const h = ((p.contracts || 0) / maxContracts) * barAreaH;
+    const y = countTop + barAreaH - h;
+    ctx.fillStyle = p.result === "win" ? "#4FAE72" : "#DB5B52";
+    ctx.fillRect(x, y, barW, Math.max(1, h));
   });
+
+  ctx.fillStyle = "#8A8D95";
+  ctx.font = "10px monospace";
+  ctx.fillText("COUNT", 4, countTop + 10);
+}
+
+function renderSimChartPage() {
+  renderSimChartRange();
+  drawSimChart(currentSimChartSlice());
 }
 
 function fmtSimDollars(v) {
@@ -1125,12 +1129,14 @@ function appendSimLogLines(lines) {
 
 function wireSimulatorTab() {
   document.getElementById("sim-chart-prev").addEventListener("click", () => {
-    if (!simChartData) return;
-    loadSimChart(simChartData.offset + SIM_CHART_COUNT);
+    if (!simPnlSeries.length) return;
+    simChartOffset = Math.min(simPnlSeries.length, simChartOffset + SIM_CHART_COUNT);
+    renderSimChartPage();
   });
   document.getElementById("sim-chart-next").addEventListener("click", () => {
-    if (!simChartData) return;
-    loadSimChart(Math.max(0, simChartData.offset - SIM_CHART_COUNT));
+    if (!simPnlSeries.length) return;
+    simChartOffset = Math.max(0, simChartOffset - SIM_CHART_COUNT);
+    renderSimChartPage();
   });
 
   document.getElementById("btn-run-sim").addEventListener("click", async () => {
@@ -1149,11 +1155,12 @@ function wireSimulatorTab() {
       }
       statusEl.textContent =
         `Done - ${data.windows_simulated} window(s), ${data.segments} segment(s), strategy=${data.strategy}`;
-      simMarkers = data.markers || [];
+      simPnlSeries = data.pnl_series || [];
+      simChartOffset = 0; // jump to the latest data
       renderSimStats(data.stats || {}, data.final_state || {});
       document.getElementById("sim-log-view").innerHTML = "";
       appendSimLogLines(data.log_lines || []);
-      await loadSimChart(0); // jump to the latest data and overlay the new markers
+      renderSimChartPage();
     } catch (e) {
       statusEl.textContent = "Failed: network error";
       statusEl.className = "save-status err";
@@ -1162,15 +1169,7 @@ function wireSimulatorTab() {
     }
   });
 
-  // Chart data is only fetched the first time the Simulator tab is actually opened.
-  document.querySelectorAll('.tab-btn[data-tab="simulator"]').forEach((btn) => {
-    btn.addEventListener("click", () => {
-      if (!simChartLoadedOnce) {
-        simChartLoadedOnce = true;
-        loadSimChart(0);
-      }
-    });
-  });
+  renderSimChartRange(); // placeholder text until a simulation has actually been run
 }
 
 // ============================================================
