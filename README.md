@@ -1,4 +1,4 @@
-<!-- V1.1 -->
+<!-- V1.2 -->
 # !!!UNDER CONSTRUCTION!!!
 # Kalshi BTC 15-Min Bot
 
@@ -66,7 +66,8 @@ result, and log what it *would* bet.
 | Key | Meaning |
 |---|---|
 | `strategy.mode` | `"momentum"` = bet same side as last window's winner. `"reversal"` = bet the opposite. `"adaptive"` = win-stay/lose-shift between the two. `"price_trend"` = bet on multi-cycle BTC price movement. `"spot_lean"` = bet on where live BTC price currently stands vs. this window's own target. `"late_fade"` = bet on a REVERSAL back toward this window's own target, watched during the entry window (see below). |
-| `strategy.late_fade.threshold_pct` | How far (in %) live BTC spot must be trading away from this window's own target before `late_fade` treats it as a reversal signal - same threshold semantics as `strategy.spot_lean.threshold_pct`, just betting the opposite direction. |
+| `strategy.late_fade.min_threshold_pct` | The minimum % gap between live BTC spot and the window's target required to trigger a late-fade reversal bet. Prevents entering on noise when the price is too close to the target. |
+| `strategy.late_fade.max_threshold_pct` | The maximum % gap allowed to trigger a late-fade bet. Prevents entering when the price has moved too far away (indicating a strong trend rather than a fade). Set to `0` for no upper limit. |
 | `strategy.spot_lean.hedge.enabled` | Off by default. If on, after the initial `spot_lean` bet, the bot keeps watching live BTC price for the rest of the window; if it crosses back to the opposite side of the target, places an opposing bet of the same contract count (still capped by `max_price_cents`) - up to `max_hedges_per_window` times. |
 | `strategy.spot_lean.hedge.net_session_sizing` | On by default. When a hedge fires, a window can end with two bets (e.g. a losing main bet + a winning hedge). This makes the martingale/recovery sizing state react to the NET combined result of the whole session rather than whichever individual bet happens to be scored last - otherwise a session that lost money overall could incorrectly reset to "fresh start". Turn off to restore the naive per-bet-immediate behavior. |
 
