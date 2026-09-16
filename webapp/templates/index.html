@@ -1,4 +1,4 @@
-<!-- V1.7 -->
+<!-- V1.8 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -667,10 +667,14 @@
         <div class="card">
           <h3>Signal</h3>
           <div class="field">
-            <label>Threshold (%)</label>
-            <input type="number" id="lf_threshold_pct" step="0.01" min="0">
+            <label>Min Threshold (%)</label>
+            <input type="number" id="lf_min_threshold_pct" step="0.001" min="0">
           </div>
-          <div class="help">How far live BTC spot must deviate from this window's target before a reversal is anticipated. Uses the same entry window and price range as the other strategies above (card 05).</div>
+          <div class="field">
+            <label>Max Threshold (%)</label>
+            <input type="number" id="lf_max_threshold_pct" step="0.001" min="0">
+          </div>
+          <div class="help">Bets on a REVERSAL back toward the window's target. Only triggers if the absolute gap between spot and target is WITHIN the min/max threshold range. Uses the same entry window and price range as the other strategies above (card 05).</div>
         </div>
       </div>
     </div>
