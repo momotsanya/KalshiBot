@@ -250,8 +250,15 @@ def _scan_spot_lean_entry(window: WindowData, target: float, cfg: dict, store: S
     return None
 
 def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: StateStore, ticker: str, spot_index):
+    """
+    late_fade: same tick-by-tick scan as spot_lean, but (1) decides the side
+    via decide_late_fade_side using a min/max threshold range (bets a reversal 
+    back toward `target`), and (2) applies bot.py's session-skip gate.
+    """
     lf_cfg = cfg["strategy"].get("late_fade", {})
-    threshold_pct = lf_cfg.get("threshold_pct", 0.0)
+    min_threshold_pct = lf_cfg.get("min_threshold_pct", 0.0)
+    max_threshold_pct = lf_cfg.get("max_threshold_pct", 0.0)
+    
     entry_start = cfg["strategy"]["entry_start_min"]
     entry_end = cfg["strategy"]["entry_end_min"]
     max_price = cfg["strategy"]["max_price_cents"]
@@ -263,16 +270,20 @@ def _scan_late_fade_entry(window: WindowData, target: float, cfg: dict, store: S
             continue
         if elapsed_min > entry_end:
             break
+            
         if not gate_checked:
             gate_checked = True
             if both_sides_too_expensive(tk.up_cents, tk.down_cents, max_price):
-                return None
-        side, _gap = decide_late_fade_side(tk.spot, target, threshold_pct)
+                return None  # session-skip gate: neither side cheap enough right at entry_start
+                
+        side, _gap = decide_late_fade_side(tk.spot, target, min_threshold_pct, max_threshold_pct)
         if side is None:
             continue
+            
         placed = _try_place(tk, side, window, ticker, cfg, store, spot_index)
         if placed:
             return placed
+            
     return None
 
 def _scan_spot_lean_hedges_and_take_profit(

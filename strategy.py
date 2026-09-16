@@ -1,4 +1,4 @@
-# V1.1
+# V1.2
 """
 Time-window math, market discovery, and UP/DOWN decision logic.
 """
@@ -236,24 +236,41 @@ def decide_spot_lean_side(spot_price: Optional[float], target_price: Optional[fl
     return None, gap_pct
 
 
-def decide_late_fade_side(spot_price: Optional[float], target_price: Optional[float], threshold_pct: float = 0.0) -> tuple:
+def decide_late_fade_side(spot_price: Optional[float], target_price: Optional[float], min_threshold_pct: float = 0.0, max_threshold_pct: float = 0.0) -> tuple:
     """
     The mirror image of decide_spot_lean_side: instead of betting WITH the
     current lean, this bets on a REVERSAL back toward the window's own
-    target (floor_strike) - used by the "late_fade" strategy, which watches
-    for this signal specifically in the closing minutes of a window.
+    target (floor_strike) - used by the "late_fade" strategy.
 
-      - spot > target (by more than threshold_pct) -> ('no', gap_pct)  [bet DOWN, anticipating reversion]
-      - spot < target (by more than threshold_pct) -> ('yes', gap_pct) [bet UP, anticipating reversion]
-      - within threshold_pct of target, or missing data -> (None, gap_pct_or_None)
+    Operates ONLY if the absolute gap is WITHIN the range:
+      min_threshold_pct <= abs(gap_pct) <= max_threshold_pct
+    
+    If max_threshold_pct is <= 0, it acts as infinity (no upper bound) for 
+    backward compatibility.
 
-    gap_pct is returned as-is (not flipped) so callers can log/display the
-    actual spot-vs-target relationship, not the inverted bet direction.
+    Returns:
+      - ('yes', gap_pct) if gap_pct is between -max_threshold_pct and -min_threshold_pct 
+        (spot is below target, bet UP for reversal)
+      - ('no', gap_pct) if gap_pct is between min_threshold_pct and max_threshold_pct 
+        (spot is above target, bet DOWN for reversal)
+      - (None, gap_pct) if gap is outside this range or data is missing.
     """
-    lean_side, gap_pct = decide_spot_lean_side(spot_price, target_price, threshold_pct)
-    if lean_side is None:
-        return None, gap_pct
-    return ("no" if lean_side == "yes" else "yes"), gap_pct
+    if spot_price is None or target_price is None or not target_price:
+        return None, None
+    
+    gap_pct = (spot_price - target_price) / target_price * 100.0
+    abs_gap = abs(gap_pct)
+    
+    # If max_threshold_pct is <= 0, treat it as no upper limit
+    upper_limit = max_threshold_pct if max_threshold_pct > 0 else float('inf')
+
+    if min_threshold_pct <= abs_gap <= upper_limit:
+        if gap_pct > 0:
+            return "no", gap_pct  # Spot is above target, bet DOWN (reversal)
+        else:
+            return "yes", gap_pct # Spot is below target, bet UP (reversal)
+
+    return None, gap_pct
 
 
 def both_sides_too_expensive(up_price_cents: Optional[int], down_price_cents: Optional[int], max_price_cents: int) -> bool:
