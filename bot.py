@@ -1,4 +1,4 @@
-# V1.9
+# V1.10
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -228,6 +228,10 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
     net_session_sizing = cfg["strategy"].get("hedge", {}).get("net_session_sizing", True)
     martingale_variant = cfg["sizing"].get("martingale_variant", "multiplier")
     martingale_unit = cfg["sizing"].get("martingale_unit", 1)
+    # Shared by both "dalembert" and "dalembert_reverse" - see state.py's
+    # record_dalembert_result / record_dalembert_reverse_result.
+    dalembert_profit_lock_cents = cfg["sizing"].get("profit_lock_cents", 0)
+    dalembert_loss_floor_cents = cfg["sizing"].get("loss_floor_cents", 0)
 
     outcomes = []  # (pending, won, cost_cents, pnl_cents)
     for pending in matching:
@@ -290,19 +294,21 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
         elif sizing_mode == "dalembert":
             store.record_dalembert_result(
                 won=session_won,
+                net_pnl_cents=net_pnl_cents,
                 unit=cfg["sizing"]["base_size"],
                 max_stake=cfg["sizing"]["max_stake"],
+                profit_lock_cents=dalembert_profit_lock_cents,
+                loss_floor_cents=dalembert_loss_floor_cents,
             )
             next_state_str = f"next_stake={store.state.current_stake}"
         elif sizing_mode == "dalembert_reverse":
-            dr_cfg = cfg["sizing"].get("dalembert_reverse", {})
             store.record_dalembert_reverse_result(
                 won=session_won,
                 net_pnl_cents=net_pnl_cents,
                 unit=cfg["sizing"]["dalembert_unit"],
                 max_stake=cfg["sizing"]["max_stake"],
-                profit_lock_cents=dr_cfg.get("profit_lock_cents", 0),
-                loss_floor_cents=dr_cfg.get("loss_floor_cents", 0),
+                profit_lock_cents=dalembert_profit_lock_cents,
+                loss_floor_cents=dalembert_loss_floor_cents,
             )
             next_state_str = f"next_stake={store.state.current_stake}"
         elif sizing_mode == "anti_martingale":
@@ -339,18 +345,20 @@ def score_pending_bets(store: StateStore, cfg: dict, ticker: str, result: Option
             elif sizing_mode == "dalembert":
                 store.record_dalembert_result(
                     won=won,
+                    net_pnl_cents=pnl_cents,
                     unit=cfg["sizing"]["base_size"],
                     max_stake=cfg["sizing"]["max_stake"],
+                    profit_lock_cents=dalembert_profit_lock_cents,
+                    loss_floor_cents=dalembert_loss_floor_cents,
                 )
             elif sizing_mode == "dalembert_reverse":
-                dr_cfg = cfg["sizing"].get("dalembert_reverse", {})
                 store.record_dalembert_reverse_result(
                     won=won,
                     net_pnl_cents=pnl_cents,
                     unit=cfg["sizing"]["dalembert_unit"],
                     max_stake=cfg["sizing"]["max_stake"],
-                    profit_lock_cents=dr_cfg.get("profit_lock_cents", 0),
-                    loss_floor_cents=dr_cfg.get("loss_floor_cents", 0),
+                    profit_lock_cents=dalembert_profit_lock_cents,
+                    loss_floor_cents=dalembert_loss_floor_cents,
                 )
             elif sizing_mode == "anti_martingale":
                 am_cfg = cfg["sizing"].get("anti_martingale", {})
