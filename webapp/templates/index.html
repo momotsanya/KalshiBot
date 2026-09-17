@@ -1,4 +1,4 @@
-<!-- V1.8 -->
+<!-- V1.9 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -359,19 +359,17 @@
             <input type="number" id="sizing_dalembert_unit" step="1" min="1">
           </div>
           <div class="help">Shared by both dalembert and dalembert_reverse. Classic dalembert: +1 unit after a loss, -1 unit after a win. dalembert_reverse: +1 unit after a win, -1 unit after a loss. Either way floored at unit size, capped at max stake.</div>
-        </div>
-        <div class="subpanel" id="dalembertReverseFields">
-          <div class="field row2">
+          <div class="field row2" style="margin-top:10px;">
             <div>
               <label>Profit-lock (c)</label>
-              <input type="number" id="dr_profit_lock_cents" step="1" min="0">
+              <input type="number" id="dal_profit_lock_cents" step="1" min="0">
             </div>
             <div>
               <label>Loss-floor (c)</label>
-              <input type="number" id="dr_loss_floor_cents" step="1" min="0">
+              <input type="number" id="dal_loss_floor_cents" step="1" min="0">
             </div>
           </div>
-          <div class="help">Optional auto-resets based on a running net-PnL counter since the last reset. Profit-lock: once that counter reaches this much profit, lock it in and reset to a fresh start. Loss-floor: once it drops this much in the red, cut the losing run short and reset. Either set to 0 disables that check.</div>
+          <div class="help">Also shared by both dalembert and dalembert_reverse. Optional auto-resets based on a running net-PnL counter since the last reset. Profit-lock: once that counter reaches this much profit, lock it in and reset to a fresh start. Loss-floor: once it drops this much in the red, cut the run short and reset. Either set to 0 disables that check.</div>
         </div>
         <div class="subpanel" id="antiMartingaleFields">
           <div class="field">
