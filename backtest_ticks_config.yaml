@@ -47,12 +47,13 @@ label_fields:
   #- hedge.max_hedges_per_window
   #- take_profit.enabled
   #- take_profit.threshold_pct
+  #- recovery.min_price_cents
 
 # What to sort the results table by. One of: pnl, bets, wins, losses,
 # skipped, win_rate, avg_price, max_loss_streak, max_drawdown, hedges,
 # take_profits.
-sort_by: max_drawdown
-sort_order: asc   # asc | desc
+sort_by: pnl_dd_ratio
+sort_order: desc   # asc | desc
 
 # ------------------------------------------------------------
 # GRID: every list here is swept combinatorially (cartesian
@@ -70,7 +71,7 @@ grid:
     strategy:
       entry_start_min: [13]
       entry_end_min: [15]
-      min_price_cents: [5, 10, 15, 20, 25, 30, 35, 40]
+      min_price_cents: [5, 10, 15, 20, 25, 30]
       max_price_cents: [50]
       momentum_filter:
         enabled: [false]
@@ -112,11 +113,11 @@ grid:
       # even though they're unused there, since grid combos are the full
       # cartesian product regardless of which values a given mode actually
       # reads) - raise --max-combos if runs get capped.
-      mode: ["dalembert"]
+      mode: ["anti_martingale"]
       max_anti_martingale_steps: [100]
       anti_martingale:
         variant: ["plus"]
-        unit: [1]
+        unit: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         multiplier: [2]
       # Only used when sizing.mode is "contracts" or "dollars" (classic
       # martingale) - controls HOW the stake grows after a loss:
@@ -138,11 +139,16 @@ grid:
       # needed, since sizing_dalembert_unit already applies to it). Left
       # off the default mode sweep above to avoid a 3rd multiplier on top
       # of the two already in play - add it in like so to test it:
-      #   mode: ["dalembert", "dalembert_reverse", "anti_martingale"]
+      #   mode: ["dalembert", "dalembert_reverse"]
       # and optionally sweep its own thresholds:
       #   dalembert_reverse:
-      #     profit_lock_cents: [0, 200, 500]
-      #     loss_floor_cents: [0, 200, 500]
+      profit_lock_cents: [0]
+      loss_floor_cents: [0]
+      # --- Recovery mode settings "recovery"---
+    recovery:
+      min_profit_cents: [10]
+      max_price_cents: [50]
+      min_price_cents: [15]
 
   spot_lean:
     strategy:
@@ -153,7 +159,8 @@ grid:
     strategy:
       late_fade:
         min_threshold_pct: [0.00]
-        max_threshold_pct: [0.005, 0.01, 0.015, 0.02, 0.025, 0.03]
+        max_threshold_pct: [0.02, 0.025, 0.03, 0.035, 0.04]
+  
 
   price_trend:
     strategy:

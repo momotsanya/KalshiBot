@@ -1,4 +1,4 @@
-# V1.4
+# V1.5
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -741,12 +741,15 @@ SORT_KEYS = {
     "max_drawdown": lambda r: r.max_drawdown_cents,
     "hedges": lambda r: r.hedges_placed,
     "take_profits": lambda r: r.take_profits_placed,
+    "pnl_dd_ratio": lambda r: (r.realized_pnl_cents / r.max_drawdown_cents) if r.max_drawdown_cents else float("-inf"),
 }
 
 STAT_COLUMNS = [
     "bets", "wins", "losses", "skipped", "win_rate_pct", "avg_price_cents",
     "max_loss_streak", "max_drawdown_usd", "pnl_usd", "hedges_placed", "take_profits_placed",
 ]
+
+XLSX_STAT_COLUMNS = [c for c in STAT_COLUMNS if c not in ("hedges_placed", "take_profits_placed")] + ["pnl_dd_ratio"]
 
 def rank_results(results: list, sort_by: str, sort_order: str) -> list:
     key_fn = SORT_KEYS.get(sort_by, SORT_KEYS["pnl"])
@@ -852,7 +855,7 @@ def export_results_xlsx(path: str, all_results: dict, sort_by: str, sort_order: 
         ranked = rank_results(results, sort_by, sort_order)
 
         param_columns = _varying_param_columns([params for params, _ in ranked])
-        headers = param_columns + STAT_COLUMNS
+        headers = param_columns + XLSX_STAT_COLUMNS          # was: STAT_COLUMNS
 
         ws = wb.create_sheet(title=strategy[:31])
         ws.append(headers)
@@ -861,8 +864,10 @@ def export_results_xlsx(path: str, all_results: dict, sort_by: str, sort_order: 
 
         for params, r in ranked:
             stats = result_stat_row(r)
+            dd_usd = r.max_drawdown_cents / 100.0
+            stats["pnl_dd_ratio"] = round(stats["pnl_usd"] / dd_usd, 3) if dd_usd else ""
             row = [params.get(tuple(col.split(".")), "") for col in param_columns]
-            row.extend(stats[c] for c in STAT_COLUMNS)
+            row.extend(stats[c] for c in XLSX_STAT_COLUMNS)   # was: STAT_COLUMNS
             ws.append(row)
 
             bucket = "low_sample" if r.bets < min_bets else _drawdown_color_bucket(r.max_drawdown_cents / 100.0)
@@ -1032,7 +1037,7 @@ def main():
 
     segments = contiguous_segments(windows)
     total_windows = sum(len(s) for s in segments)
-    log.info("Loaded %s windows across %s contiguous segment(s) (gaps reset sizing state, same as backtest.py).",
+    log.info("Loaded %s windows across %s contiguous segment(s)",
               total_windows, len(segments))
     if total_windows < 50:
         log.warning("Only %s windows of tick data available - results below will have wide uncertainty.", total_windows)
@@ -1040,7 +1045,7 @@ def main():
     results_by_segment = []
     for seg in segments:
         seg_results = []
-        for i, w in enumerate(seg):
+        for i, w in __builtins__.enumerate(seg):
             next_w = seg[i + 1] if i + 1 < len(seg) else None
             seg_results.append(determine_result(w, next_w))
         results_by_segment.append(seg_results)
