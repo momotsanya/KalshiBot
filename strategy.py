@@ -1,4 +1,4 @@
-# V1.2
+# V1.3
 """
 Time-window math, market discovery, and UP/DOWN decision logic.
 """
@@ -143,7 +143,10 @@ def decide_price_trend_side(series: list, threshold_pct: float) -> tuple:
     return None, pct_change
 
 
-def check_momentum_filter(price_history: list, lookback_sec: float, side: str, now: Optional[float] = None) -> tuple:
+def check_momentum_filter(
+    price_history: list, lookback_sec: float, side: str, now: Optional[float] = None,
+    max_adverse_move_pct: float = 0.0,
+) -> tuple:
     """
     Checks whether `side` (the direction some strategy has already chosen)
     agrees with the SHORT-TERM BTC price trend over the last `lookback_sec`
@@ -158,6 +161,14 @@ def check_momentum_filter(price_history: list, lookback_sec: float, side: str, n
       - allowed: True if there's no data yet / no clear trend (doesn't block
         on ambiguity), or if `side` matches recent_direction. False only when
         there IS a clear recent trend and it's the OPPOSITE of `side`.
+
+    max_adverse_move_pct (default 0.0 = the original behavior, any move against
+    `side` blocks): tolerance, in percent of the oldest price in the window.
+    A move AGAINST `side` no larger than this is ignored (allowed); only a move
+    against `side` that is LARGER than this blocks. e.g. 0.02 with a 60s
+    lookback allows an order unless BTC has moved more than 0.02% away from the
+    order's direction over the last 60s. Moves in favor of `side` never block.
+    recent_direction is still reported as the raw direction either way.
     """
     now = now if now is not None else price_history[-1][0] if price_history else 0.0
     cutoff = now - lookback_sec
@@ -174,7 +185,15 @@ def check_momentum_filter(price_history: list, lookback_sec: float, side: str, n
     else:
         return True, None  # flat - no clear direction, nothing to block on
 
-    return side == direction, direction
+    if side == direction:
+        return True, direction
+
+    # Move is AGAINST `side`: only block if it is bigger than the tolerance.
+    if max_adverse_move_pct > 0 and oldest_price:
+        adverse_pct = abs(newest_price - oldest_price) / oldest_price * 100.0
+        if adverse_pct <= max_adverse_move_pct:
+            return True, direction
+    return False, direction
 
 
 def compute_recovery_size(

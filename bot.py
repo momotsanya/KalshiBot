@@ -1,4 +1,4 @@
-# V1.10
+# V1.11
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -531,6 +531,7 @@ def wait_and_place_bet(client: KalshiClient, store: StateStore, cfg: dict, windo
     mf_cfg = cfg["strategy"].get("momentum_filter", {})
     mf_enabled = mf_cfg.get("enabled", False)
     mf_lookback = mf_cfg.get("lookback_sec", 30)
+    mf_max_adverse = mf_cfg.get("max_adverse_move_pct", 0.0)
     mf_price_history = []  # rolling (monotonic_ts, price) samples, trimmed to mf_lookback each poll
 
     dynamic_side = callable(side)
@@ -607,13 +608,22 @@ def wait_and_place_bet(client: KalshiClient, store: StateStore, cfg: dict, windo
 
         mf_allowed, mf_direction = True, None
         if mf_enabled:
-            mf_spot, _mf_source = spot_price.get_btc_spot_price()
-            if mf_spot is not None:
-                now_mono = time.monotonic()
-                mf_price_history.append((now_mono, mf_spot))
-                cutoff = now_mono - mf_lookback
-                mf_price_history[:] = [(t, p) for t, p in mf_price_history if t >= cutoff]
-            mf_allowed, mf_direction = check_momentum_filter(mf_price_history, mf_lookback, side)
+            # Prefer the CF Benchmarks worker's continuous per-second history: it is already
+            # filling BEFORE the entry window opens, so the filter has a full lookback at
+            # entry_start_min (matching tick_backtest, which sees the whole recorded series).
+            # Fall back to this function's own sampling buffer if that history is too short.
+            mf_hist = spot_price.get_cf_history(mf_lookback)
+            if len(mf_hist) < 2:
+                mf_spot, _mf_source = spot_price.get_btc_spot_price()
+                if mf_spot is not None:
+                    now_mono = time.monotonic()
+                    mf_price_history.append((now_mono, mf_spot))
+                    cutoff = now_mono - mf_lookback
+                    mf_price_history[:] = [(t, p) for t, p in mf_price_history if t >= cutoff]
+                mf_hist = mf_price_history
+            mf_allowed, mf_direction = check_momentum_filter(
+                mf_hist, mf_lookback, side, max_adverse_move_pct=mf_max_adverse,
+            )
 
         price = None
         try:
@@ -636,8 +646,9 @@ def wait_and_place_bet(client: KalshiClient, store: StateStore, cfg: dict, windo
 
         if mf_enabled and not mf_allowed:
             log.info(
-                "Momentum filter: last %ss BTC trend is %s, blocking a %s order - waiting | entry closes in %s",
-                mf_lookback, label(mf_direction), label(side), fmt_secs(time_left_entry),
+                "Momentum filter: last %ss BTC trend is %s (tolerance %.3f%%), blocking a %s order - "
+                "waiting | entry closes in %s",
+                mf_lookback, label(mf_direction), mf_max_adverse, label(side), fmt_secs(time_left_entry),
             )
             time.sleep(poll_interval)
             continue
@@ -1157,6 +1168,12 @@ def run(cfg: dict):
     else:
         log.info("Live tick logger disabled (live_tick.enabled: false in config).")
     # -----------------------------------------------------------
+
+    # The momentum filter needs BTC spot history that already spans its lookback when the
+    # entry window opens, so start the CF Benchmarks scraper now (the tick logger, if on,
+    # has already started it; this is idempotent).
+    if cfg["strategy"].get("momentum_filter", {}).get("enabled", False):
+        spot_price.start_cfbenchmarks_worker()
 
     log.info("=" * 60)
     log.info("Environment : %s", env)

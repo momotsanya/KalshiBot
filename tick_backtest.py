@@ -1,4 +1,4 @@
-# V1.5
+# V1.6
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -189,7 +189,10 @@ def _try_place(tk: Tick, side: str, window: WindowData, ticker: str, cfg: dict, 
     if mf_cfg.get("enabled", False):
         mf_lookback = mf_cfg.get("lookback_sec", 30)
         hist = momentum_history_slice(spot_index[0], spot_index[1], tk.t, mf_lookback)
-        allowed, _direction = check_momentum_filter(hist, mf_lookback, side, now=tk.t.timestamp())
+        allowed, _direction = check_momentum_filter(
+            hist, mf_lookback, side, now=tk.t.timestamp(),
+            max_adverse_move_pct=mf_cfg.get("max_adverse_move_pct", 0.0),
+        )
         if not allowed:
             return None
 

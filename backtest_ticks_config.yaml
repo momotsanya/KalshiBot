@@ -1,4 +1,4 @@
-# V1.5
+# V1.6
 # ============================================================
 # Config for tick_backtest.py
 # Replays strategies against your recorded ./data/*.jsonl tick
@@ -47,6 +47,9 @@ label_fields:
   #- hedge.max_hedges_per_window
   #- take_profit.enabled
   #- take_profit.threshold_pct
+  #- momentum_filter.enabled
+  #- momentum_filter.lookback_sec
+  #- momentum_filter.max_adverse_move_pct
   #- recovery.min_price_cents
 
 # What to sort the results table by. One of: pnl, bets, wins, losses,
@@ -74,8 +77,9 @@ grid:
       min_price_cents: [5, 10, 15, 20, 25, 30]
       max_price_cents: [50]
       momentum_filter:
-        enabled: [false]
-        lookback_sec: [40]
+        enabled: [true]
+        lookback_sec: [60]
+        max_adverse_move_pct: [0.01, 0.02, 0.03, 0.04, 0.05]
       # --- Hedge: fires an opposing bet if BTC crosses back against the
       # main bet's side before the window closes. Applies underneath
       # whichever strategy is being tested (see strategies_to_test above).
@@ -97,13 +101,13 @@ grid:
       # strategy - adding swept take_profit dimensions multiplies that
       # further, so lower --max-combos or trim the hedge grid first.
       take_profit:
-        enabled: [false]
-        threshold_pct: [0.01]
-        time_start_min: [7]
-        time_end_min: [14]
+        enabled: [true]
+        threshold_pct: [0.00]
+        time_start_min: [13]
+        time_end_min: [15]
         min_price_cents: [1]
-        max_price_cents: [75]
-        min_profit_cents: [20]
+        max_price_cents: [40]
+        min_profit_cents: [10]
         fresh_start_only: [true]
     sizing:
       # "contracts" | "dollars" | "recovery" | "dalembert" | "dalembert_reverse" | "anti_martingale"
@@ -113,11 +117,11 @@ grid:
       # even though they're unused there, since grid combos are the full
       # cartesian product regardless of which values a given mode actually
       # reads) - raise --max-combos if runs get capped.
-      mode: ["anti_martingale"]
+      mode: ["recovery"]
       max_anti_martingale_steps: [100]
       anti_martingale:
         variant: ["plus"]
-        unit: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        unit: [1]
         multiplier: [2]
       # Only used when sizing.mode is "contracts" or "dollars" (classic
       # martingale) - controls HOW the stake grows after a loss:
@@ -148,7 +152,7 @@ grid:
     recovery:
       min_profit_cents: [10]
       max_price_cents: [50]
-      min_price_cents: [15]
+      min_price_cents: [5, 10, 15, 20, 25, 30]
 
   spot_lean:
     strategy:

@@ -1,4 +1,4 @@
-# V1.0
+# V1.1
 """
 Fetches the current BTC/USD spot price from public sources.
 
@@ -31,6 +31,7 @@ import atexit
 import logging
 import time
 import threading
+from collections import deque
 from typing import Optional
 
 import requests
@@ -73,6 +74,10 @@ _last_scraped_value_since = None  # monotonic timestamp this value was first see
 _cfbenchmarks_lock = threading.Lock()
 _cfbenchmarks_latest_price = None
 _cfbenchmarks_latest_time = 0.0
+# Rolling per-second history of (epoch_seconds, price) from the worker thread, used by
+# bot.py's momentum filter so it has a FULL lookback the moment the entry window opens
+# (instead of starting empty at entry_start_min). Guarded by _cfbenchmarks_lock.
+_cfbenchmarks_history = deque(maxlen=900)
 _cfbenchmarks_worker_started = False
 
 # Set by force_reload_cfbenchmarks() (callable from ANY thread, e.g. the
@@ -222,6 +227,7 @@ def _cfbenchmarks_worker():
                 with _cfbenchmarks_lock:
                     _cfbenchmarks_latest_price = price
                     _cfbenchmarks_latest_time = time.time()
+                    _cfbenchmarks_history.append((_cfbenchmarks_latest_time, price))
         except Exception as e:  # noqa: BLE001
             log.debug("CF Benchmarks worker error: %s", e)
         time.sleep(1.0)
@@ -234,6 +240,23 @@ def _start_cfbenchmarks_worker():
     t = threading.Thread(target=_cfbenchmarks_worker, daemon=True, name="CFBenchmarksWorker")
     t.start()
     log.info("CF Benchmarks background scraper started.")
+
+def start_cfbenchmarks_worker():
+    """
+    Public, idempotent: starts the CF Benchmarks scraper thread now instead of lazily on
+    the first price read. bot.py calls this at startup when the momentum filter is on, so
+    the price history is already filling before the first entry window opens.
+    """
+    _start_cfbenchmarks_worker()
+
+def get_cf_history(lookback_sec: float) -> list:
+    """
+    Returns [(epoch_seconds, price), ...] (oldest -> newest) of CF Benchmarks samples from
+    the last `lookback_sec` seconds. Empty until the worker has produced samples.
+    """
+    cutoff = time.time() - lookback_sec
+    with _cfbenchmarks_lock:
+        return [(t, p) for t, p in _cfbenchmarks_history if t >= cutoff]
 
 def force_reload_cfbenchmarks():
     """
