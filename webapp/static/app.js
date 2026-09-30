@@ -1,4 +1,4 @@
-// V1.9
+// V1.10
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -740,6 +740,7 @@ function wireConfigFields() {
 
   bindField("mf_enabled", ["strategy", "momentum_filter", "enabled"], "toggle");
   bindField("mf_lookback_sec", ["strategy", "momentum_filter", "lookback_sec"], "number");
+  bindField("mf_max_adverse_move_pct", ["strategy", "momentum_filter", "max_adverse_move_pct"], "number");
   bindField("cf_enabled", ["strategy", "chop_filter", "enabled"], "toggle");
   bindField("cf_lookback", ["strategy", "chop_filter", "lookback"], "number");
   bindField("cf_max_alternations", ["strategy", "chop_filter", "max_alternations"], "number");
