@@ -1,4 +1,4 @@
-# V1.6
+# V1.7
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -113,15 +113,60 @@ def load_window_file(path: str) -> Optional[WindowData]:
 
     return WindowData(open_time=open_time, close_time=close_time, strike=strike, ticks=ticks, path=path)
 
-def load_all_windows(data_dir: str, pattern: str = "*.jsonl") -> list:
+def parse_range_bound(value, is_end: bool = False) -> Optional[dt.datetime]:
+    """
+    Parses a --start-date / --end-date value (CLI string, or a date/datetime that
+    PyYAML auto-produces from an unquoted 2026-09-10 in the YAML config) into a
+    naive LOCAL datetime (same clock as the tick filenames / 'time' field).
+    Accepts 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DDTHH:MM'.
+    A date-only END is inclusive of that whole day (returned as next midnight,
+    used as an exclusive upper bound). An END with a time is exclusive.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, dt.datetime):
+        return value
+    if isinstance(value, dt.date):
+        d = dt.datetime(value.year, value.month, value.day)
+        return d + dt.timedelta(days=1) if is_end else d
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            parsed = dt.datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if fmt == "%Y-%m-%d" and is_end:
+            parsed += dt.timedelta(days=1)
+        return parsed
+    raise ValueError(f"Unrecognized date '{value}' (use YYYY-MM-DD or 'YYYY-MM-DD HH:MM')")
+
+def _in_range(t: dt.datetime, start: Optional[dt.datetime], end: Optional[dt.datetime]) -> bool:
+    if start is not None and t < start:
+        return False
+    if end is not None and t >= end:
+        return False
+    return True
+
+def load_all_windows(
+    data_dir: str, pattern: str = "*.jsonl",
+    start: Optional[dt.datetime] = None, end: Optional[dt.datetime] = None,
+) -> list:
     paths = sorted(glob.glob(os.path.join(data_dir, pattern)))
     windows = []
     for p in paths:
+        # Fast path: the filename already encodes the window's open time, so
+        # out-of-range files are skipped without being opened or parsed.
+        name_time = parse_filename_open_time(p)
+        if name_time is not None and not _in_range(name_time, start, end):
+            continue
         w = load_window_file(p)
-        if w is not None:
-            windows.append(w)
-        else:
+        if w is None:
             log.debug("Skipping empty/unparseable file: %s", p)
+            continue
+        # Files whose names don't match the pattern: filter on their first tick instead.
+        if name_time is None and not _in_range(w.open_time, start, end):
+            continue
+        windows.append(w)
     windows.sort(key=lambda w: w.open_time)
     return windows
 
@@ -974,6 +1019,12 @@ def main():
     )
     parser.add_argument("--backtest-config", default="backtest_ticks_config.yaml")
     parser.add_argument("--data-dir", default=None, help="Override data_dir from the backtest config")
+    parser.add_argument("--start-date", default=None,
+                        help="Only use tick files from this date on (YYYY-MM-DD or 'YYYY-MM-DD HH:MM', local time). "
+                             "Overrides start_date in the backtest config.")
+    parser.add_argument("--end-date", default=None,
+                        help="Only use tick files up to and INCLUDING this date (YYYY-MM-DD), or exclusive of "
+                             "'YYYY-MM-DD HH:MM'. Overrides end_date in the backtest config.")
     parser.add_argument("--top", type=int, default=25, help="Show only the top N rows per strategy")
     parser.add_argument("--min-bets", type=int, default=20, help="Flag rows with fewer bets than this as low-sample")
     parser.add_argument("--max-combos", type=int, default=200, help="Safety cap on grid size per strategy")
@@ -1032,10 +1083,22 @@ def main():
         log.warning("Unknown sort_by=%s, falling back to 'pnl'. Valid options: %s", sort_by, ", ".join(SORT_KEYS))
         sort_by = "pnl"
 
-    log.info("Loading tick data from %s (pattern: %s)...", data_dir, file_pattern)
-    windows = load_all_windows(data_dir, file_pattern)
+    try:
+        range_start = parse_range_bound(args.start_date if args.start_date is not None else bt_cfg.get("start_date"))
+        range_end = parse_range_bound(args.end_date if args.end_date is not None else bt_cfg.get("end_date"), is_end=True)
+    except ValueError as e:
+        log.error("%s", e)
+        sys.exit(1)
+    if range_start and range_end and range_start >= range_end:
+        log.error("start date (%s) must be before end date (%s).", range_start, range_end)
+        sys.exit(1)
+
+    log.info("Loading tick data from %s (pattern: %s, range: %s -> %s)...", data_dir, file_pattern,
+             range_start.strftime("%Y-%m-%d %H:%M") if range_start else "beginning",
+             (range_end.strftime("%Y-%m-%d %H:%M") + " exclusive") if range_end else "end")
+    windows = load_all_windows(data_dir, file_pattern, start=range_start, end=range_end)
     if not windows:
-        log.error("No usable JSONL tick files found in %s - nothing to backtest.", data_dir)
+        log.error("No usable JSONL tick files found in %s for that date range - nothing to backtest.", data_dir)
         sys.exit(1)
 
     segments = contiguous_segments(windows)
