@@ -1,4 +1,4 @@
-<!-- V1.9 -->
+<!-- V1.10 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -467,6 +467,11 @@
           <div class="field" style="margin-top:10px;">
             <label>Lookback (sec)</label>
             <input type="number" id="mf_lookback_sec" step="5" min="5">
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label>Max adverse move (%)</label>
+            <input type="number" id="mf_max_adverse_move_pct" step="0.005" min="0">
+            <div class="help">Ignore a move against the order's direction unless it is bigger than this over the lookback. 0 = any adverse move blocks.</div>
           </div>
         </div>
         <div class="subpanel">
