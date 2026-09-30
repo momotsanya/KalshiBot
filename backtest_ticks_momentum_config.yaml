@@ -1,0 +1,176 @@
+# V1.0
+# ============================================================
+# Config for tick_backtest.py
+# Replays strategies against your recorded ./data/*.jsonl tick
+# files (from data_logger.py) instead of calling the Kalshi API.
+# ============================================================
+#python tick_backtest.py --backtest-config backtest_ticks_momentum_config.yaml
+#python tick_backtest.py --backtest-config backtest_ticks_momentum_config.yaml --export-xlsx momentum_results.xlsx
+
+# Folder containing your live_ticks_YYYYMMDD_HHMM.jsonl files.
+data_dir: "./data"
+file_pattern: "*.jsonl"
+
+# Anything NOT overridden in the grid below (auth, market, runtime.dry_run,
+# etc.) is pulled from your real config.yaml - point this at it.
+base_config: "./config.yaml"
+
+# Which strategies to run. Each gets its own results table. Hedging now
+# works underneath every one of these (see grid.common.strategy.hedge
+# below) - it only depends on live BTC spot vs. this window's own
+# floor_strike, not on which strategy picked the side, so it's no longer
+# spot_lean-only.
+strategies_to_test:
+  #- spot_lean
+  - late_fade
+  #- momentum
+  #- reversal
+  #- adaptive
+  #- price_trend
+
+# ------------------------------------------------------------
+# DISPLAY: independent of what's swept below. Override either
+# on the command line (--label-fields, --sort-by, --sort-order)
+# without editing this file.
+# ------------------------------------------------------------
+
+# Which swept params to show in the Params column, and in what order.
+# Dotted names, "strategy." prefix optional either way. Omit/comment out
+# to show every swept param (can get long with a wide grid).
+label_fields:
+  #- spot_lean.threshold_pct
+  #- sizing.mode
+  #- sizing.anti_martingale.variant
+  #- sizing.max_anti_martingale_steps
+  #- hedge.enabled
+  #- hedge.smart_sizing
+  #- hedge.max_hedges_per_window
+  #- take_profit.enabled
+  #- take_profit.threshold_pct
+  - momentum_filter.lookback_sec
+  - momentum_filter.max_adverse_move_pct
+  #- recovery.min_price_cents
+
+# What to sort the results table by. One of: pnl, bets, wins, losses,
+# skipped, win_rate, avg_price, max_loss_streak, max_drawdown, hedges,
+# take_profits.
+sort_by: pnl_dd_ratio
+sort_order: desc   # asc | desc
+
+# ------------------------------------------------------------
+# GRID: every list here is swept combinatorially (cartesian
+# product). "common" params apply to every strategy tested;
+# strategy-specific blocks apply only to that strategy's runs.
+# hedge/take_profit live under "common" now (moved out of the old
+# spot_lean-only block) so they sweep for EVERY strategy in
+# strategies_to_test above, not just spot_lean.
+# Keep the grids small at first - this is combinatorial, and with
+# 5 strategies x a hedge grid this size it can get big fast - raise
+# --max-combos or trim the hedge grid further if a run gets capped.
+# ------------------------------------------------------------
+grid:
+  common:
+    strategy:
+      entry_start_min: [13]
+      entry_end_min: [15]
+      min_price_cents: [15]
+      max_price_cents: [50]
+      momentum_filter:
+        # NOTE: this file only sweeps the momentum filter - everything else is pinned to the
+        # best results.xlsx row (min_price 15, anti_martingale unit 2, late_fade max 0.035).
+        # Unfiltered baseline = the same run with enabled: [false] (or that xlsx row).
+        # max_adverse_move_pct 0.0 = the ORIGINAL direction-only filter (any adverse move blocks).
+        enabled: [true]
+        lookback_sec: [60]
+        max_adverse_move_pct: [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+      # --- Hedge: fires an opposing bet if BTC crosses back against the
+      # main bet's side before the window closes. Applies underneath
+      # whichever strategy is being tested (see strategies_to_test above).
+      hedge:
+        enabled: [false]
+        threshold_pct: [0.02]
+        fresh_start_only: [true]
+        smart_sizing: [true]
+        max_hedges_per_window: [0]
+        min_profit_cents: [1]
+        max_contracts: [500]
+      # take_profit is the mirror of hedge - locks in a gain instead of
+      # protecting against a loss. Left off (single-value list, so it
+      # doesn't multiply the grid) by default - flip `enabled` to a swept
+      # list to actually test it, e.g.:
+      #   enabled: [false, true]
+      #   threshold_pct: [0.03, 0.05, 0.08]
+      # NOTE: the hedge grid above is already 5 x 5 = 25 combos per
+      # strategy - adding swept take_profit dimensions multiplies that
+      # further, so lower --max-combos or trim the hedge grid first.
+      take_profit:
+        enabled: [false]
+        threshold_pct: [0.01]
+        time_start_min: [7]
+        time_end_min: [14]
+        min_price_cents: [1]
+        max_price_cents: [75]
+        min_profit_cents: [20]
+        fresh_start_only: [true]
+    sizing:
+      # "contracts" | "dollars" | "recovery" | "dalembert" | "dalembert_reverse" | "anti_martingale"
+      # Sweeping mode/variant/max_anti_martingale_steps here multiplies every
+      # combo count below (2 modes x 2 variants x 2 step-caps = 8x - and the
+      # anti_martingale-only fields still apply to every dalembert combo too,
+      # even though they're unused there, since grid combos are the full
+      # cartesian product regardless of which values a given mode actually
+      # reads) - raise --max-combos if runs get capped.
+      mode: ["recovery"]
+      max_anti_martingale_steps: [100]
+      anti_martingale:
+        variant: ["plus"]
+        unit: [2]
+        multiplier: [2]
+      # Only used when sizing.mode is "contracts" or "dollars" (classic
+      # martingale) - controls HOW the stake grows after a loss:
+      #   "multiplier" (default) - stake is multiplied by martingale_multiplier
+      #     each loss (classic doubling - exponential growth).
+      #   "plus"                 - stake instead increases by +martingale_unit
+      #     contracts each loss (gentler, linear growth) - the same "+1 per
+      #     step" idea sizing.mode="anti_martingale" already offers for win
+      #     streaks (see anti_martingale.variant below), just applied here to
+      #     martingale's loss side instead.
+      # Either variant resets straight back to base_size on a win, and
+      # max_martingale_steps/max_stake still apply as the same circuit
+      # breakers regardless of which variant is active.
+      max_martingale_steps: [100]
+      martingale_variant: ["plus"]
+      martingale_unit: [1]
+      martingale_multiplier: [2]
+      # dalembert_reverse shares dalembert_unit (swept separately isn't
+      # needed, since sizing_dalembert_unit already applies to it). Left
+      # off the default mode sweep above to avoid a 3rd multiplier on top
+      # of the two already in play - add it in like so to test it:
+      #   mode: ["dalembert", "dalembert_reverse"]
+      # and optionally sweep its own thresholds:
+      #   dalembert_reverse:
+      profit_lock_cents: [0]
+      loss_floor_cents: [0]
+      # --- Recovery mode settings "recovery"---
+    recovery:
+      min_profit_cents: [10]
+      max_price_cents: [50]
+      min_price_cents: [15]
+
+  spot_lean:
+    strategy:
+      spot_lean:
+        threshold_pct: [0.02, 0.03]
+
+  late_fade:
+    strategy:
+      late_fade:
+        min_threshold_pct: [0.00]
+        max_threshold_pct: [0.02]
+  
+
+  price_trend:
+    strategy:
+      price_trend:
+        lookback_cycles: [2, 4, 6, 8]
+        threshold_pct: [0.05, 0.1, 0.15, 0.2]
