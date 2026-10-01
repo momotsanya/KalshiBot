@@ -1,4 +1,4 @@
-# V1.0
+# V1.1
 requests>=2.31
 cryptography>=42.0
 PyYAML>=6.0
@@ -6,3 +6,4 @@ colorama>=0.4.6
 playwright>=1.40  # optional - only needed for spot_lean's CF Benchmarks scraping source; run 'playwright install chromium' once after pip install
 flask>=3.0        # only needed for the webapp/ dashboard (server.py)
 ruamel.yaml>=0.18  # only needed for the webapp/ dashboard - preserves config.yaml's comments when saving from the UI
+openpyxl>=3.1   # only needed for the webapp/ Backtest tab (and tick_backtest.py --export-xlsx) - writes the .xlsx result file
