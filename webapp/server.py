@@ -1,4 +1,4 @@
-# V1.3
+# V1.6
 """
 Local web dashboard for the Kalshi BTC 15-min bot.
 
@@ -24,6 +24,7 @@ not bank-grade security - don't expose this port to the open internet
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import subprocess
@@ -34,6 +35,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+import yaml as pyyaml  # PyYAML - tick_backtest.py's own loader; 'yaml' below is the ruamel instance
 from flask import Flask, jsonify, request, send_from_directory, session
 from ruamel.yaml import YAML
 
@@ -42,6 +44,7 @@ CONFIG_PATH = BOT_DIR / "config.yaml"
 BOT_SCRIPT = BOT_DIR / "bot.py"
 SECRET_FILE = Path(__file__).resolve().parent / ".dashboard_secret"
 DATA_DIR = BOT_DIR / "data"
+RESULTS_DIR = BOT_DIR / "results"  # backtest .xlsx result files land here
 
 # bot.py / tick_backtest.py / simulator.py / state.py etc. all live in BOT_DIR
 # (one level up from this file), not in webapp/ - add it to sys.path so the
@@ -54,6 +57,13 @@ try:
 except Exception as e:  # noqa: BLE001 - missing/broken dependency shouldn't take down the whole dashboard
     sim_module = None
     _SIM_IMPORT_ERROR = f"{type(e).__name__}: {e}"
+
+try:
+    import tick_backtest as tb
+    _TB_IMPORT_ERROR = None
+except Exception as e:  # noqa: BLE001
+    tb = None
+    _TB_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = secrets.token_hex(32)  # session signing key - regenerates each server restart, logging everyone out (intentional, simplest safe default)
@@ -539,6 +549,383 @@ def api_simulator_run():
         return jsonify({"ok": False, "error": result["error"]})
     result["ok"] = True
     return jsonify(result)
+
+
+# ---------- Backtest tab ----------
+# Runs tick_backtest.py's own grid search (same functions its CLI main() uses -
+# no sizing/hedge/take-profit math is reimplemented here) in a background
+# thread, so the dashboard stays responsive while a big grid runs. One job at
+# a time; progress is polled via /api/backtest/status.
+
+def _backtest_yaml_files() -> list:
+    """backtest_ticks*.yaml files in the bot folder (the CLI's own config naming)."""
+    try:
+        return sorted(p.name for p in BOT_DIR.glob("backtest_ticks*.yaml"))
+    except OSError:
+        return []
+
+
+def _resolve_backtest_file(name: str):
+    """Only files from the whitelist above - never a caller-supplied path."""
+    if name in _backtest_yaml_files():
+        return BOT_DIR / name
+    return None
+
+
+class BacktestJob:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.cancel_event = threading.Event()
+        self._reset()
+
+    def _reset(self):
+        self.state = "idle"  # idle | running | done | error | cancelled
+        self.error: str | None = None
+        self.progress = {
+            "phase": "", "strategy": "", "done": 0, "total": 0,
+            "strategy_index": 0, "strategies_total": 0,
+        }
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+        self.result: dict | None = None
+        self.all_results: dict | None = None
+        self.xlsx_path: str | None = None
+        self.xlsx_error: str | None = None
+
+    def start(self, opts: dict) -> tuple[bool, str]:
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return False, "A backtest is already running."
+            self._reset()
+            self.cancel_event.clear()
+            self.state = "running"
+            self.started_at = time.time()
+            self.thread = threading.Thread(target=self._run, args=(opts,), daemon=True, name="BacktestJob")
+            self.thread.start()
+            return True, "Started."
+
+    def cancel(self) -> tuple[bool, str]:
+        with self.lock:
+            if self.thread is None or not self.thread.is_alive():
+                return False, "No backtest is running."
+            self.cancel_event.set()
+            return True, "Cancelling..."
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            elapsed = None
+            if self.started_at is not None:
+                elapsed = (self.finished_at or time.time()) - self.started_at
+            return {
+                "state": self.state,
+                "error": self.error,
+                "progress": dict(self.progress),
+                "elapsed_sec": elapsed,
+                "result": self.result,
+                "xlsx_file": os.path.basename(self.xlsx_path) if self.xlsx_path else None,
+                "xlsx_error": self.xlsx_error,
+            }
+
+    def _set_progress(self, **kw):
+        with self.lock:
+            self.progress.update(kw)
+
+    def _run(self, opts: dict):
+        import logging
+        state_logger = logging.getLogger("state")
+        bot_logger = logging.getLogger("bot")
+        prev_state_level, prev_bot_level = state_logger.level, bot_logger.level
+        state_logger.setLevel(logging.ERROR)
+        bot_logger.setLevel(logging.WARNING)
+        try:
+            self._run_inner(opts)
+        except Exception as e:  # noqa: BLE001
+            with self.lock:
+                self.state = "error"
+                self.error = f"{type(e).__name__}: {e}"
+                self.finished_at = time.time()
+        finally:
+            state_logger.setLevel(prev_state_level)
+            bot_logger.setLevel(prev_bot_level)
+
+    def _run_inner(self, opts: dict):
+        bt_cfg = pyyaml.safe_load(opts["yaml_text"]) or {}
+        if not isinstance(bt_cfg, dict):
+            raise ValueError("Backtest YAML must be a mapping at the top level.")
+
+        data_dir = str((BOT_DIR / bt_cfg.get("data_dir", "./data")).resolve())
+        file_pattern = bt_cfg.get("file_pattern", "*.jsonl")
+        base_cfg_path = (BOT_DIR / bt_cfg.get("base_config", "./config.yaml")).resolve()
+        base_cfg = tb.load_yaml(str(base_cfg_path))
+        strategies = bt_cfg.get("strategies_to_test", ["spot_lean"])
+        if not strategies:
+            raise ValueError("strategies_to_test is empty - uncomment at least one strategy.")
+        grid_cfg = bt_cfg.get("grid", {}) or {}
+        common_grid = grid_cfg.get("common", {}) or {}
+
+        label_fields = bt_cfg.get("label_fields")
+        if isinstance(label_fields, str):
+            label_fields = [f.strip() for f in label_fields.split(",") if f.strip()]
+        sort_by = opts.get("sort_by") or bt_cfg.get("sort_by", "pnl")
+        if sort_by not in tb.SORT_KEYS:
+            sort_by = "pnl"
+        sort_order = opts.get("sort_order") or bt_cfg.get("sort_order", "desc")
+        if sort_order not in ("asc", "desc"):
+            sort_order = "desc"
+        min_bets = int(opts.get("min_bets", 20))
+        max_combos = int(opts.get("max_combos", 100000))
+        top_n = int(opts.get("top", 50))
+
+        start_raw = opts.get("start_date") or bt_cfg.get("start_date")
+        end_raw = opts.get("end_date") or bt_cfg.get("end_date")
+        range_start = tb.parse_range_bound(start_raw)
+        range_end = tb.parse_range_bound(end_raw, is_end=True)
+        if range_start and range_end and range_start >= range_end:
+            raise ValueError("Start date must be before end date.")
+
+        self._set_progress(phase="loading", strategy="", done=0, total=0, strategies_total=len(strategies))
+        windows = tb.load_all_windows(data_dir, file_pattern, start=range_start, end=range_end)
+        if not windows:
+            raise ValueError(f"No usable tick files found in {data_dir} for that date range.")
+        if self.cancel_event.is_set():
+            return self._finish_cancelled()
+
+        segments = tb.contiguous_segments(windows)
+        total_windows = sum(len(seg) for seg in segments)
+        results_by_segment = []
+        for seg in segments:
+            seg_results = []
+            for i, w in enumerate(seg):
+                next_w = seg[i + 1] if i + 1 < len(seg) else None
+                seg_results.append(tb.determine_result(w, next_w))
+            results_by_segment.append(seg_results)
+        spot_index = tb.build_spot_index(windows)
+
+        all_results = {}
+        for s_idx, strategy in enumerate(strategies, 1):
+            strat_grid = grid_cfg.get(strategy, {}) or {}
+            combos = list(tb.iter_grid_combos(base_cfg, common_grid, strat_grid))
+            capped_from = None
+            if len(combos) > max_combos:
+                capped_from = len(combos)
+                combos = combos[:max_combos]
+            self._set_progress(
+                phase="running", strategy=strategy, done=0, total=len(combos), strategy_index=s_idx,
+            )
+            results = []
+            for i, (params, cfg) in enumerate(combos, 1):
+                if self.cancel_event.is_set():
+                    return self._finish_cancelled()
+                cfg.setdefault("strategy", {})["mode"] = strategy
+                agg = tb.run_strategy_over_segments(strategy, segments, results_by_segment, spot_index, cfg)
+                results.append((params, agg))
+                self._set_progress(done=i)
+            all_results[strategy] = (results, capped_from)
+
+        plain_results = {k: v[0] for k, v in all_results.items()}
+        payload = {
+            "windows": total_windows,
+            "segments": len(segments),
+            "range_start": range_start.strftime("%Y-%m-%d %H:%M") if range_start else None,
+            "range_end": range_end.strftime("%Y-%m-%d %H:%M") if range_end else None,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "min_bets": min_bets,
+            "strategies": {},
+        }
+        for strategy, (results, capped_from) in all_results.items():
+            payload["strategies"][strategy] = _build_strategy_payload(
+                results, label_fields, sort_by, sort_order, min_bets, top_n, capped_from,
+            )
+        # Same workbook the CLI's --export-xlsx writes (one sheet per strategy, rows
+        # color-coded by max drawdown, ALL combos - not just the top N shown on screen).
+        xlsx_path, xlsx_error = None, None
+        try:
+            RESULTS_DIR.mkdir(exist_ok=True)
+            xlsx_path = str(RESULTS_DIR / f"backtest_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+            tb.export_results_xlsx(xlsx_path, plain_results, sort_by, sort_order, min_bets)
+            if not os.path.exists(xlsx_path):  # export_results_xlsx logs + returns if openpyxl is missing
+                xlsx_path = None
+                xlsx_error = "Could not write the XLSX file - is openpyxl installed? (pip install openpyxl)"
+        except Exception as e:  # noqa: BLE001
+            xlsx_path = None
+            xlsx_error = f"{type(e).__name__}: {e}"
+
+        with self.lock:
+            self.all_results = plain_results
+            self.xlsx_path, self.xlsx_error = xlsx_path, xlsx_error
+            self.result = payload
+            self.state = "done"
+            self.finished_at = time.time()
+
+    def _finish_cancelled(self):
+        with self.lock:
+            self.state = "cancelled"
+            self.finished_at = time.time()
+
+
+def _build_strategy_payload(results, label_fields, sort_by, sort_order, min_bets, top_n, capped_from) -> dict:
+    ranked = tb.rank_results(results, sort_by, sort_order)
+    if label_fields:
+        cols = [".".join(tb._norm_path(tuple(f.strip().split(".")))) for f in label_fields]
+    else:
+        cols = tb._varying_param_columns([params for params, _ in results])
+    rows = []
+    for params, r in (ranked[:top_n] if top_n > 0 else ranked):
+        pmap = {".".join(k): v for k, v in params.items()}
+        stats = tb.result_stat_row(r)
+        ratio = round(r.realized_pnl_cents / r.max_drawdown_cents, 2) if r.max_drawdown_cents else None
+        rows.append({
+            "params": {c: pmap.get(c) for c in cols},
+            **stats,
+            "pnl_dd_ratio": ratio,
+            "low_sample": r.bets < min_bets,
+            "dd_bucket": tb._drawdown_color_bucket(r.max_drawdown_cents / 100.0),
+        })
+    return {
+        "columns": cols,
+        "rows": rows,
+        "total_combos": len(results),
+        "shown": len(rows),
+        "capped_from": capped_from,
+    }
+
+
+backtest_job = BacktestJob()
+
+
+@app.route("/api/backtest/files")
+@require_auth
+def api_backtest_files():
+    return jsonify({
+        "files": _backtest_yaml_files(),
+        "sort_keys": list(tb.SORT_KEYS.keys()) if tb is not None else [],
+        "error": None if tb is not None else f"Backtest unavailable: {_TB_IMPORT_ERROR}",
+    })
+
+
+@app.route("/api/backtest/config", methods=["GET"])
+@require_auth
+def api_backtest_get_config():
+    path = _resolve_backtest_file(request.args.get("file", ""))
+    if path is None:
+        return jsonify({"ok": False, "error": "Unknown backtest config file."}), 404
+    try:
+        return jsonify({"ok": True, "file": path.name, "text": path.read_text(encoding="utf-8")})
+    except OSError as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/backtest/config", methods=["POST"])
+@require_auth
+def api_backtest_save_config():
+    data = request.get_json(force=True, silent=True) or {}
+    path = _resolve_backtest_file(data.get("file", ""))
+    text = data.get("text")
+    if path is None or not isinstance(text, str):
+        return jsonify({"ok": False, "error": "Invalid payload."}), 400
+    try:
+        pyyaml.safe_load(text)  # refuse to save something that won't even parse
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"Not valid YAML: {e}"}), 400
+    # Atomic write, same reasoning as save_config_raw().
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".bt_cfg.", suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+    except Exception as e:  # noqa: BLE001
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/backtest/run", methods=["POST"])
+@require_auth
+def api_backtest_run():
+    if tb is None:
+        return jsonify({"ok": False, "error": f"Backtest unavailable: {_TB_IMPORT_ERROR}"}), 500
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get("yaml_text")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"ok": False, "error": "No backtest YAML provided."}), 400
+    try:
+        pyyaml.safe_load(text)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"Not valid YAML: {e}"}), 400
+
+    def _int(key, default, lo):
+        try:
+            return max(lo, int(data.get(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    opts = {
+        "yaml_text": text,
+        "start_date": (data.get("start_date") or "").strip() or None,
+        "end_date": (data.get("end_date") or "").strip() or None,
+        "sort_by": data.get("sort_by") or None,
+        "sort_order": data.get("sort_order") or None,
+        "min_bets": _int("min_bets", 20, 0),
+        "max_combos": _int("max_combos", 100000, 1),
+        "top": _int("top", 50, 0),
+    }
+    ok, msg = backtest_job.start(opts)
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/backtest/cancel", methods=["POST"])
+@require_auth
+def api_backtest_cancel():
+    ok, msg = backtest_job.cancel()
+    return jsonify({"ok": ok, "message": msg})
+
+
+@app.route("/api/backtest/status")
+@require_auth
+def api_backtest_status():
+    return jsonify(backtest_job.snapshot())
+
+
+def _open_in_file_manager(folder: Path, select_file: str | None) -> tuple[bool, str]:
+    """
+    Opens `folder` in the OS file manager ON THE MACHINE RUNNING THIS SERVER
+    (selecting `select_file` where the platform supports it). Only ever called
+    with RESULTS_DIR and a file name this process generated - never a
+    caller-supplied path.
+    """
+    try:
+        if sys.platform.startswith("win"):
+            if select_file:
+                subprocess.Popen(f'explorer /select,"{folder / select_file}"')  # explorer's exit code is unreliable
+            else:
+                os.startfile(str(folder))  # noqa: S606 - Windows only
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(folder / select_file)] if select_file else ["open", str(folder)])
+        else:
+            if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+                return False, "No desktop session on the server machine to open a file manager in."
+            subprocess.Popen(["xdg-open", str(folder)])
+        return True, "Opened."
+    except Exception as e:  # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+@app.route("/api/backtest/open_folder", methods=["POST"])
+@require_auth
+def api_backtest_open_folder():
+    with backtest_job.lock:
+        path = backtest_job.xlsx_path
+    folder = Path(path).parent if path else RESULTS_DIR
+    if not folder.exists():
+        return jsonify({"ok": False, "folder": str(folder), "message": "Results folder doesn't exist yet - run a backtest first."}), 404
+    select_file = os.path.basename(path) if path and os.path.exists(path) else None
+    ok, msg = _open_in_file_manager(folder, select_file)
+    return jsonify({"ok": ok, "folder": str(folder), "file": select_file, "message": msg})
 
 
 def _open_browser_when_ready(url: str, timeout_sec: float = 10.0):
