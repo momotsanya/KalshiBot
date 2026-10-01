@@ -1,4 +1,4 @@
-<!-- V1.10 -->
+<!-- V1.13 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -48,6 +48,7 @@
   <nav class="tabs">
     <button class="tab-btn active" data-tab="monitor">Monitor</button>
     <button class="tab-btn" data-tab="simulator">Simulator</button>
+    <button class="tab-btn" data-tab="backtest">Backtest</button>
     <button class="tab-btn" data-tab="config">Configuration</button>
   </nav>
 
@@ -225,6 +226,95 @@
       </div>
       <div id="sim-log-view" class="log-view"><div class="log-empty">Run a simulation to see log output here.</div></div>
     </div>
+  </section>
+
+  <!-- ===================== BACKTEST ===================== -->
+  <section id="tab-backtest" class="tab-panel">
+    <div class="config-header">
+      <p class="config-note">Grid-searches strategy parameters against the recorded tick files - the same engine as <code>tick_backtest.py</code>. Edit the grid below (it is the contents of a <code>backtest_ticks*.yaml</code> file), then run.</p>
+    </div>
+
+    <div class="cards bt-options">
+      <div class="card">
+        <h3><span class="n">A</span> Config file</h3>
+        <div class="field">
+          <label>Backtest YAML</label>
+          <select id="bt-file"></select>
+        </div>
+        <div class="field bt-btn-row">
+          <button type="button" id="bt-reload" class="btn">Reload from disk</button>
+          <button type="button" id="bt-save" class="btn">Save to file</button>
+        </div>
+        <span id="bt-save-status" class="save-status"></span>
+      </div>
+      <div class="card">
+        <h3><span class="n">B</span> Date range</h3>
+        <div class="field row2">
+          <div>
+            <label>Start date</label>
+            <input type="date" id="bt-start-date">
+          </div>
+          <div>
+            <label>End date (inclusive)</label>
+            <input type="date" id="bt-end-date">
+          </div>
+        </div>
+        <div class="help">Blank = use start_date / end_date from the YAML, or all recorded data if those are unset too.</div>
+      </div>
+      <div class="card">
+        <h3><span class="n">C</span> Results</h3>
+        <div class="field row2">
+          <div>
+            <label>Sort by</label>
+            <select id="bt-sort-by"></select>
+          </div>
+          <div>
+            <label>Order</label>
+            <select id="bt-sort-order">
+              <option value="asc">asc</option>
+              <option value="desc">desc</option>
+            </select>
+          </div>
+        </div>
+        <div class="field row2">
+          <div>
+            <label>Show top</label>
+            <input type="number" id="bt-top" step="1" min="0" value="50">
+          </div>
+          <div>
+            <label>Low-sample below (bets)</label>
+            <input type="number" id="bt-min-bets" step="1" min="0" value="20">
+          </div>
+        </div>
+        <div class="field">
+          <label>Max combos / strategy</label>
+          <input type="number" id="bt-max-combos" step="1000" min="1" value="100000">
+        </div>
+      </div>
+    </div>
+
+    <div class="panel bt-yaml-panel">
+      <div class="panel-header">
+        <span>Backtest grid (YAML)</span>
+        <span id="bt-yaml-status" class="save-status"></span>
+      </div>
+      <textarea id="bt-yaml" class="bt-yaml" spellcheck="false" wrap="off"></textarea>
+    </div>
+
+    <div class="config-header bt-run-row">
+      <button id="bt-run" class="btn btn-save">Run Backtest</button>
+      <button id="bt-cancel" class="btn btn-stop" disabled>Cancel</button>
+      <button type="button" id="bt-export" class="btn hidden">Open Result file</button>
+      <span id="bt-run-status" class="save-status"></span>
+    </div>
+
+    <div id="bt-progress" class="panel bt-progress hidden">
+      <div class="bt-progress-label" id="bt-progress-label">-</div>
+      <div class="bt-progress-track"><div id="bt-progress-fill" class="bt-progress-fill"></div></div>
+    </div>
+
+    <div id="bt-summary" class="bt-summary hidden"></div>
+    <div id="bt-results"></div>
   </section>
 
   <!-- ===================== CONFIGURATION ===================== -->
