@@ -1,4 +1,4 @@
-// V1.10
+// V1.13
 // ============================================================
 // Auth / bootstrap
 // ============================================================
@@ -1179,11 +1179,298 @@ function wireSimulatorTab() {
 }
 
 // ============================================================
+// Backtest tab (drives /api/backtest/* - tick_backtest.py's grid search)
+// ============================================================
+let btPollTimer = null;
+let btLastResult = null;
+let btSort = {};   // per strategy: {key, dir} - client-side re-sort of the rows already returned
+
+const BT_STAT_COLS = [
+  ["bets", "Bets"], ["wins", "Wins"], ["losses", "Losses"], ["skipped", "Skipped"],
+  ["win_rate_pct", "WinRate%"], ["avg_price_cents", "AvgPx"], ["max_loss_streak", "LossStrk"],
+  ["max_drawdown_usd", "MaxDD$"], ["pnl_usd", "PnL$"], ["pnl_dd_ratio", "PnL/DD"],
+  ["hedges_placed", "Hedges"], ["take_profits_placed", "TPs"],
+];
+
+function btSetStatus(id, text, isErr) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = "save-status" + (isErr ? " err" : "");
+}
+
+async function btLoadYaml() {
+  const file = document.getElementById("bt-file").value;
+  if (!file) return;
+  try {
+    const res = await fetch("/api/backtest/config?file=" + encodeURIComponent(file));
+    const data = await res.json();
+    if (!data.ok) { btSetStatus("bt-yaml-status", data.error || "Could not load file", true); return; }
+    document.getElementById("bt-yaml").value = data.text;
+    btSetStatus("bt-yaml-status", "Loaded " + data.file, false);
+  } catch (e) {
+    btSetStatus("bt-yaml-status", "Could not load file", true);
+  }
+}
+
+async function btInitFiles() {
+  const fileSel = document.getElementById("bt-file");
+  const sortSel = document.getElementById("bt-sort-by");
+  try {
+    const res = await fetch("/api/backtest/files");
+    const data = await res.json();
+    if (data.error) btSetStatus("bt-run-status", data.error, true);
+    fileSel.innerHTML = "";
+    (data.files || []).forEach((f) => {
+      const o = document.createElement("option");
+      o.value = f; o.textContent = f;
+      fileSel.appendChild(o);
+    });
+    sortSel.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = ""; blank.textContent = "(from YAML)";
+    sortSel.appendChild(blank);
+    (data.sort_keys || []).forEach((k) => {
+      const o = document.createElement("option");
+      o.value = k; o.textContent = k;
+      sortSel.appendChild(o);
+    });
+    document.getElementById("bt-sort-order").insertAdjacentHTML("afterbegin", '<option value="">(from YAML)</option>');
+    document.getElementById("bt-sort-order").value = "";
+    if (!(data.files || []).length) {
+      btSetStatus("bt-yaml-status", "No backtest_ticks*.yaml files found in the bot folder", true);
+      return;
+    }
+    await btLoadYaml();
+  } catch (e) {
+    btSetStatus("bt-yaml-status", "Could not reach the server", true);
+  }
+}
+
+async function btSaveYaml() {
+  const file = document.getElementById("bt-file").value;
+  btSetStatus("bt-save-status", "Saving...", false);
+  try {
+    const res = await fetch("/api/backtest/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file, text: document.getElementById("bt-yaml").value }),
+    });
+    const data = await res.json();
+    btSetStatus("bt-save-status", data.ok ? "Saved" : "Save failed: " + (data.error || "unknown error"), !data.ok);
+  } catch (e) {
+    btSetStatus("bt-save-status", "Save failed: network error", true);
+  }
+}
+
+async function btRun() {
+  const payload = {
+    yaml_text: document.getElementById("bt-yaml").value,
+    start_date: document.getElementById("bt-start-date").value,
+    end_date: document.getElementById("bt-end-date").value,
+    sort_by: document.getElementById("bt-sort-by").value,
+    sort_order: document.getElementById("bt-sort-order").value,
+    top: document.getElementById("bt-top").value,
+    min_bets: document.getElementById("bt-min-bets").value,
+    max_combos: document.getElementById("bt-max-combos").value,
+  };
+  btSetStatus("bt-run-status", "Starting...", false);
+  try {
+    const res = await fetch("/api/backtest/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!data.ok) { btSetStatus("bt-run-status", data.error || data.message || "Failed to start", true); return; }
+    btStartPolling();
+  } catch (e) {
+    btSetStatus("bt-run-status", "Failed: network error", true);
+  }
+}
+
+async function btCancel() {
+  document.getElementById("bt-cancel").disabled = true;
+  try { await fetch("/api/backtest/cancel", { method: "POST" }); } catch (e) { /* next poll shows state */ }
+}
+
+async function btOpenFolder() {
+  try {
+    const res = await fetch("/api/backtest/open_folder", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      btSetStatus("bt-run-status", "Opened folder: " + data.folder, false);
+    } else {
+      btSetStatus("bt-run-status",
+        (data.message || "Could not open the folder") + (data.folder ? " Results are in: " + data.folder : ""), true);
+    }
+  } catch (e) {
+    btSetStatus("bt-run-status", "Could not reach the server", true);
+  }
+}
+
+function btStartPolling() {
+  if (btPollTimer) return;
+  btPollTimer = setInterval(btPoll, 1000);
+  btPoll();
+}
+
+function btFmtTime(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + "m" + String(s).padStart(2, "0") + "s";
+}
+
+async function btPoll() {
+  let data;
+  try {
+    const res = await fetch("/api/backtest/status");
+    if (!res.ok) return;
+    data = await res.json();
+  } catch (e) { return; }
+
+  const running = data.state === "running";
+  document.getElementById("bt-run").disabled = running;
+  document.getElementById("bt-cancel").disabled = !running;
+  const progEl = document.getElementById("bt-progress");
+  progEl.classList.toggle("hidden", !running);
+
+  if (running) {
+    const p = data.progress || {};
+    let label, pct = 0;
+    if (p.phase === "loading") {
+      label = "Loading tick data...";
+    } else {
+      pct = p.total ? (p.done / p.total) * 100 : 0;
+      const eta = (p.done > 0 && data.elapsed_sec) ? (data.elapsed_sec / p.done) * (p.total - p.done) : null;
+      label = `${p.strategy} (${p.strategy_index}/${p.strategies_total}): ${p.done}/${p.total} combos` +
+        ` | elapsed ${btFmtTime(data.elapsed_sec)}` + (eta != null ? ` | ~${btFmtTime(eta)} left for this strategy` : "");
+    }
+    document.getElementById("bt-progress-label").textContent = label;
+    document.getElementById("bt-progress-fill").style.width = pct.toFixed(1) + "%";
+    btSetStatus("bt-run-status", "Running...", false);
+    return;
+  }
+
+  if (btPollTimer) { clearInterval(btPollTimer); btPollTimer = null; }
+  if (data.state === "done" && data.result) {
+    btSetStatus("bt-run-status", "Done in " + btFmtTime(data.elapsed_sec) +
+      (data.xlsx_file ? " | saved results/" + data.xlsx_file : ""), false);
+    if (data.xlsx_error) btSetStatus("bt-run-status", "Done, but XLSX not saved: " + data.xlsx_error, true);
+    btRenderResults(data.result, !!data.xlsx_file);
+  } else if (data.state === "error") {
+    btSetStatus("bt-run-status", "Failed: " + (data.error || "unknown error"), true);
+  } else if (data.state === "cancelled") {
+    btSetStatus("bt-run-status", "Cancelled", false);
+  }
+}
+
+function btFmtParam(v) {
+  if (v === null || v === undefined) return "-";
+  return String(v);
+}
+
+function btCellValue(row, key) {
+  const v = row[key];
+  return (v === "" || v === null || v === undefined) ? null : v;
+}
+
+function btRenderResults(result, hasXlsx) {
+  btLastResult = result;
+  document.getElementById("bt-export").classList.toggle("hidden", !hasXlsx);
+
+  const sum = document.getElementById("bt-summary");
+  sum.classList.remove("hidden");
+  sum.textContent =
+    `${result.windows} windows, ${result.segments} contiguous segment(s) | range: ` +
+    `${result.range_start || "beginning"} -> ${result.range_end ? result.range_end + " (excl.)" : "end"} | ` +
+    `sorted by ${result.sort_by} ${result.sort_order}`;
+
+  const host = document.getElementById("bt-results");
+  host.innerHTML = "";
+  for (const [strategy, block] of Object.entries(result.strategies)) {
+    if (!btSort[strategy]) btSort[strategy] = { key: null, dir: "desc" };
+    const wrap = document.createElement("div");
+    wrap.className = "bt-strategy-block";
+    wrap.dataset.strategy = strategy;
+    host.appendChild(wrap);
+    btRenderStrategy(wrap, strategy, block, result.min_bets);
+  }
+}
+
+function btRenderStrategy(wrap, strategy, block, minBets) {
+  const sortState = btSort[strategy];
+  let rows = block.rows.slice();
+  if (sortState.key) {
+    const dir = sortState.dir === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      const av = btCellValue(a, sortState.key), bv = btCellValue(b, sortState.key);
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      return (av - bv) * dir;
+    });
+  }
+
+  let html = `<div class="block-title">${strategy} (${block.shown} of ${block.total_combos} combos shown)</div>`;
+  html += '<div class="panel bt-table-wrap"><table class="bt-table"><thead><tr>';
+  for (const c of block.columns) html += `<th class="param">${c}</th>`;
+  for (const [key, title] of BT_STAT_COLS) {
+    const sorted = sortState.key === key;
+    const arrow = sorted ? (sortState.dir === "asc" ? " ^" : " v") : "";
+    html += `<th data-key="${key}" class="${sorted ? "sorted" : ""}">${title}${arrow}</th>`;
+  }
+  html += "</tr></thead><tbody>";
+  for (const r of rows) {
+    const cls = ["dd-" + r.dd_bucket];
+    if (r.low_sample) cls.push("low-sample");
+    html += `<tr class="${cls.join(" ")}">`;
+    for (const c of block.columns) html += `<td class="param">${btFmtParam(r.params[c])}</td>`;
+    for (const [key] of BT_STAT_COLS) {
+      const v = btCellValue(r, key);
+      let cell = v === null ? "-" : (key === "max_drawdown_usd" || key === "pnl_usd" ? Number(v).toFixed(2) : v);
+      let tdCls = "";
+      if ((key === "pnl_usd" || key === "pnl_dd_ratio") && v !== null) tdCls = v > 0 ? "pos" : v < 0 ? "neg" : "";
+      html += `<td class="${tdCls}">${cell}</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table></div>";
+  let note = `Row shading = max drawdown (green < $100, up to red >= $300). Faded rows have fewer than ${minBets} bets (low sample). Click a column header to re-sort the rows shown.`;
+  if (block.capped_from) note += ` Grid had ${block.capped_from} combos - capped at ${block.total_combos}; raise "Max combos" to test more.`;
+  html += `<p class="bt-note">${note}</p>`;
+  wrap.innerHTML = html;
+
+  wrap.querySelectorAll("th[data-key]").forEach((th) => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (sortState.key === key) sortState.dir = sortState.dir === "asc" ? "desc" : "asc";
+      else { sortState.key = key; sortState.dir = "desc"; }
+      btRenderStrategy(wrap, strategy, block, minBets);
+    });
+  });
+}
+
+function wireBacktestTab() {
+  if (!document.getElementById("tab-backtest")) return;
+  document.getElementById("bt-file").addEventListener("change", btLoadYaml);
+  document.getElementById("bt-reload").addEventListener("click", btLoadYaml);
+  document.getElementById("bt-save").addEventListener("click", btSaveYaml);
+  document.getElementById("bt-run").addEventListener("click", btRun);
+  document.getElementById("bt-cancel").addEventListener("click", btCancel);
+  document.getElementById("bt-export").addEventListener("click", btOpenFolder);
+  btInitFiles();
+  btPoll();  // picks up a run already in progress / last finished result after a page reload
+  fetch("/api/backtest/status").then((r) => r.json()).then((d) => { if (d.state === "running") btStartPolling(); }).catch(() => {});
+}
+
+// ============================================================
 // Init
 // ============================================================
 function initApp() {
   wireTopTabs();
   wireSimulatorTab();
+  wireBacktestTab();
   wireConfigFields();
   buildGaugeStatic();
   buildUpDownGaugeStatic();
