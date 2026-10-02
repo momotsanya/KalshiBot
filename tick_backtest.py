@@ -1,4 +1,4 @@
-# V1.7
+# V1.8
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -37,7 +37,7 @@ from strategy import (
     compute_take_profit_profit,
     check_momentum_filter,
 )
-from bot import contracts_for_stake, score_pending_bets, _session_side_totals
+from bot import contracts_for_stake, score_pending_bets, _session_side_totals, is_fresh_start
 
 log = logging.getLogger("tick_backtest")
 
@@ -351,9 +351,12 @@ def _scan_spot_lean_hedges_and_take_profit(
     if not hedge_enabled and not tp_enabled:
         return {"hedges_placed": 0, "take_profit_placed": False}
 
-    if hedge_enabled and hedge_cfg.get("fresh_start_only", True) and main_placed["count"] != 1:
+    # Same check bot.py's monitor_hedge uses (see bot.is_fresh_start) - NOT
+    # "count == 1", which wrongly treated a 1-contract recovery bet as fresh.
+    session_is_fresh = is_fresh_start(store, cfg)
+    if hedge_enabled and hedge_cfg.get("fresh_start_only", True) and not session_is_fresh:
         hedge_enabled = False
-    if tp_enabled and tp_cfg.get("fresh_start_only", True) and main_placed["count"] != 1:
+    if tp_enabled and tp_cfg.get("fresh_start_only", True) and not session_is_fresh:
         tp_enabled = False
     if not hedge_enabled and not tp_enabled:
         return {"hedges_placed": 0, "take_profit_placed": False}

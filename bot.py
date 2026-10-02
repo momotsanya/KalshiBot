@@ -1,4 +1,4 @@
-# V1.11
+# V1.12
 """
 Kalshi BTC 15-min UP/DOWN martingale bot.
 
@@ -821,6 +821,29 @@ def _submit_order(
     return filled_count
 
 
+def is_fresh_start(store: StateStore, cfg: dict) -> bool:
+    """
+    True only when the sizing state is genuinely at a fresh start: no
+    unrecovered loss being chased (recovery mode's cumulative_loss_cents)
+    AND the stake has not been grown away from base_size by a martingale /
+    anti-martingale / dalembert progression. Used by hedge.fresh_start_only
+    and take_profit.fresh_start_only.
+
+    This replaces the old `main order count == 1` proxy, which was wrong in
+    recovery mode: compute_recovery_size() can legitimately return a count of
+    1 while the bot is still chasing a loss (e.g. cumulative_loss=$0.36 at a
+    40c price needs only 1 contract), so a recovery session looked like a
+    fresh start. It was also wrong the other way for base_size > 1.
+    Reads state as it stands BEFORE this session settles (pending bets don't
+    change any of these fields), so it is safe to call after the main order
+    is placed.
+    """
+    if store.state.cumulative_loss_cents > 0:
+        return False
+    base_size = cfg["sizing"]["base_size"]
+    return store.state.current_stake <= base_size
+
+
 def _session_side_totals(store: StateStore, ticker: str, fee_cents: int) -> dict:
     """
     Sums up contract count and total cost (incl. fees), per side, across all
@@ -903,20 +926,21 @@ def monitor_hedge(
         return
 
     hedge_fresh_start_only = hedge_cfg.get("fresh_start_only", True)
-    if hedge_enabled and hedge_fresh_start_only and count != 1:
+    session_is_fresh = is_fresh_start(store, cfg)
+    if hedge_enabled and hedge_fresh_start_only and not session_is_fresh:
         log.info(
-            "Hedge monitor: main order count=%s (not a fresh start) - hedging is disabled for this session "
-            "per hedge.fresh_start_only (hedges only follow a single-contract, fresh-start main bet).",
-            count,
+            "Hedge monitor: not a fresh start (stake=%s, cumulative_loss=$%.2f) - hedging is disabled for this "
+            "session per hedge.fresh_start_only.",
+            store.state.current_stake, store.state.cumulative_loss_cents / 100,
         )
         hedge_enabled = False
 
     tp_fresh_start_only = tp_cfg.get("fresh_start_only", True)
-    if tp_enabled and tp_fresh_start_only and count != 1:
+    if tp_enabled and tp_fresh_start_only and not session_is_fresh:
         log.info(
-            "Take-profit monitor: main order count=%s (not a fresh start) - take-profit is disabled for this "
-            "session per take_profit.fresh_start_only.",
-            count,
+            "Take-profit monitor: not a fresh start (stake=%s, cumulative_loss=$%.2f) - take-profit is disabled "
+            "for this session per take_profit.fresh_start_only.",
+            store.state.current_stake, store.state.cumulative_loss_cents / 100,
         )
         tp_enabled = False
 
