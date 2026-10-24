@@ -1,4 +1,4 @@
-# V1.0
+# V1.1
 """
 Minimal Kalshi trade-api v2 client.
 
@@ -101,10 +101,15 @@ class KalshiClient:
 
     # ---------- Market data ----------
 
-    def get_markets(self, series_ticker: str, status: Optional[str] = None, limit: int = 50) -> list[dict]:
+    def get_markets(self, series_ticker: str, status: Optional[str] = None, limit: int = 50,
+                    min_close_ts: Optional[int] = None, max_close_ts: Optional[int] = None) -> list[dict]:
         params = {"series_ticker": series_ticker, "limit": limit}
         if status:
             params["status"] = status
+        if min_close_ts is not None:
+            params["min_close_ts"] = min_close_ts
+        if max_close_ts is not None:
+            params["max_close_ts"] = max_close_ts
         data = self._request("GET", "/markets", params=params)
         return data.get("markets", []) if data else []
 

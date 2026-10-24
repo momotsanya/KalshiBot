@@ -1,4 +1,4 @@
-# V1.3
+# V1.4
 """
 Time-window math, market discovery, and UP/DOWN decision logic.
 """
@@ -35,7 +35,26 @@ def previous_window(w: Window) -> Window:
     return Window(w.open_time - dt.timedelta(minutes=WINDOW_MINUTES), w.open_time)
 
 
-def _fetch_candidate_markets(client: KalshiClient, series_ticker: str) -> list[dict]:
+def _fetch_candidate_markets(client: KalshiClient, series_ticker: str,
+                             around: Optional[list] = None) -> list[dict]:
+    """
+    `around` = list of Windows we care about. Kalshi now lists many future
+    'initialized' markets that crowd the unfiltered results, so when given,
+    ask only for markets closing within +/-3 min of those windows
+    (status left unset so open/closed/settled all come back).
+    """
+    if around:
+        lo = min(w.close_time for w in around) - dt.timedelta(minutes=3)
+        hi = max(w.close_time for w in around) + dt.timedelta(minutes=3)
+        try:
+            found = client.get_markets(
+                series_ticker, limit=100,
+                min_close_ts=int(lo.timestamp()), max_close_ts=int(hi.timestamp()),
+            )
+            if found:
+                return found
+        except Exception as e:  # noqa: BLE001
+            log.debug("get_markets(close_ts filter) failed: %s", e)
     candidates = []
     for status in (None, "open", "settled", "closed"):
         try:
@@ -65,20 +84,12 @@ def _match_market_to_window(candidates: list[dict], window: "Window") -> Optiona
 
 
 def find_market_for_window(client: KalshiClient, series_ticker: str, window: "Window") -> Optional[dict]:
-    """Find the single market whose close_time matches the given window's close_time."""
-    candidates = _fetch_candidate_markets(client, series_ticker)
+    candidates = _fetch_candidate_markets(client, series_ticker, around=[window])
     return _match_market_to_window(candidates, window)
 
 
 def find_markets_for_windows(client: KalshiClient, series_ticker: str, windows: list) -> dict:
-    """
-    Look up markets for several windows at once, fetching the candidate pool
-    only ONCE and matching all windows against it (instead of one full fetch
-    per window) - used by the price-trend strategy, which needs several
-    consecutive windows' data per cycle.
-    Returns {window: market_or_None}.
-    """
-    candidates = _fetch_candidate_markets(client, series_ticker)
+    candidates = _fetch_candidate_markets(client, series_ticker, around=windows)
     return {w: _match_market_to_window(candidates, w) for w in windows}
 
 
