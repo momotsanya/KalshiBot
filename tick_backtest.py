@@ -1,4 +1,4 @@
-# V1.8
+# V1.9
 """
 Backtest the bot's strategies against your OWN recorded live-tick JSONL data
 (written by data_logger.py into ./data/), instead of fetching from the Kalshi
@@ -671,8 +671,20 @@ def simulate_price_trend_segment(segment, results, spot_index, cfg, store, obser
 
 def run_strategy_over_segments(
     strategy: str, segments: list, results_by_segment: list, spot_index, cfg: dict, observer=None,
+    carry_totals: bool = False,
 ) -> TickBacktestResult:
+    """
+    Each contiguous segment of recorded data gets a FRESH StateStore, so sizing state (stake,
+    loss streak, recovery debt, ...) resets at every gap in the recordings - the bot can't
+    know what happened in the missing windows. carry_totals=True additionally seeds each new
+    segment's store with the RUNNING lifetime totals (total_pnl_cents, wins, losses,
+    max_drawdown_cents) from the previous segment, so a replay's logged "Total PnL" / "Record" /
+    "Max Drawdown" and its PnL curve keep accumulating across gaps instead of snapping back to
+    $0 at the start of each segment. Used by the dashboard Simulator; the grid search leaves it
+    off (its results only use per-segment deltas + a max, so they're identical either way).
+    """
     agg = TickBacktestResult(label=strategy)
+    carried = None  # (total_pnl_cents, total_wins, total_losses, max_drawdown_cents) from the previous segment
     for seg, results in zip(segments, results_by_segment):
         if len(seg) < 2:
             continue
@@ -680,6 +692,9 @@ def run_strategy_over_segments(
         os.close(fd)
         try:
             store = StateStore(state_path, base_stake=cfg["sizing"]["base_size"])
+            if carry_totals and carried is not None:
+                (store.state.total_pnl_cents, store.state.total_wins,
+                 store.state.total_losses, store.state.max_drawdown_cents) = carried
             if strategy == "spot_lean":
                 r = simulate_spot_lean_segment(seg, results, spot_index, cfg, store, observer=observer)
             elif strategy == "late_fade":
@@ -696,6 +711,10 @@ def run_strategy_over_segments(
 
             if observer:
                 observer.segment_finished(store.state)
+            carried = (
+                store.state.total_pnl_cents, store.state.total_wins,
+                store.state.total_losses, store.state.max_drawdown_cents,
+            )
 
             agg.bets += r.bets
             agg.wins += r.wins

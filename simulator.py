@@ -1,4 +1,4 @@
-# V1.2
+# V1.3
 """
 Historical bot-behavior simulator for the web dashboard's "Simulator" tab.
 
@@ -216,7 +216,9 @@ def run_simulation(
     bot_module.log.setLevel(logging.INFO)
     bot_module.log.addHandler(cap)
     try:
-        agg = run_strategy_over_segments(strategy, segments, results_by_segment, spot_index, cfg, observer=observer)
+        agg = run_strategy_over_segments(
+            strategy, segments, results_by_segment, spot_index, cfg, observer=observer, carry_totals=True,
+        )
     finally:
         bot_module.log.removeHandler(cap)
         bot_module.log.setLevel(prev_level)
